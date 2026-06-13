@@ -277,16 +277,15 @@ def bilan_etat(emplois, classes, permanents, services, indispos):
     bilan.append(("ok", "Mercredi après-midi : aucun permanent.") if n == 0
                  else ("erreur", f"{n} permanent(s) placé(s) le mercredi après-midi."))
 
-    # Trous (information, non bloquant)
+    # Trous (information, non bloquant) — sur la journée entière : un créneau
+    # vide entouré de cours avant ET après compte, y compris à l'heure du midi.
     trous = 0
     for cl in classes:
         for d in range(N_JOURS):
             occ = [(cl, d, t) in emplois for t in range(N_SLOTS)]
-            for plage in (range(1, IDX_DEBUT_APMIDI), range(IDX_DEBUT_APMIDI + 1, N_SLOTS)):
-                for t in plage:
-                    if occ[t] and not occ[t - 1] \
-                       and any(occ[tp] for tp in range(plage.start - 1, t)):
-                        trous += 1
+            for t in range(1, N_SLOTS):
+                if not occ[t] and any(occ[:t]) and any(occ[t:]):
+                    trous += 1
     bilan.append(("ok", "Aucun trou dans les grilles des classes.") if trous == 0
                  else ("info", f"{trous} trou(s) dans les grilles (créneau vide entre deux cours)."))
 

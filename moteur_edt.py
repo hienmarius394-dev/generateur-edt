@@ -125,7 +125,11 @@ def lire_excel(chemin):
 
 
 # ════════════════════ 2. SOLVEUR ════════════════════
-def resoudre(classes, permanents, services, indispos, temps_max=120):
+def resoudre(classes, permanents, services, indispos, temps_max=120,
+             matin_prefere=False):
+    """matin_prefere : si True, le moteur préfère remplir les matinées et
+    libérer les après-midis (utile pour les écoles « tout le matin »).
+    Dans tous les cas, la compacité des journées est fortement favorisée."""
     model = cp_model.CpModel()
 
     # ── Variable principale : x[s,d,t] = service s placé jour d, créneau t
@@ -242,23 +246,52 @@ def resoudre(classes, permanents, services, indispos, temps_max=120):
             if svc["matiere"] in LOURDES:
                 malus.append(x[s, d, N_SLOTS - 1])
 
-    # Compacité : pénaliser chaque "trou" (créneau vide entre deux cours)
-    # dans une demi-journée, pour les classes ET pour les profs.
+    # ── Compacité : pénaliser tout créneau vide ENTRE deux cours sur la
+    # même JOURNÉE (et plus seulement à l'intérieur d'une demi-journée).
+    # C'est ce qui élimine le cas « cours à 10h puis cours à 16h » : le grand
+    # vide du midi devient un trou coûteux que le moteur cherche à supprimer
+    # en regroupant les cours. Pénalité forte (POIDS_TROU).
+    POIDS_TROU = 6
+
     def penaliser_trous(groupes, prefixe):
         for g_idx, s_list in enumerate(groupes):
             for d in range(N_JOURS):
                 def occ(t):
                     return sum(x[s, d, t] for s in s_list)
-                for plage in (range(1, 5), range(6, 8)):
-                    for t in plage:
-                        j = model.new_bool_var(f"{prefixe}_{g_idx}_{d}_{t}")
-                        model.add(j >= occ(t) - occ(t - 1))
-                        model.add(j <= occ(t))
-                        model.add(j <= 1 - occ(t - 1))
-                        malus.append(2 * j)
+                # « actif[t] » = il existe un cours à un créneau >= t ce jour-là.
+                # Un trou = créneau vide alors qu'un cours vient avant ET après.
+                # On le détecte sur toute l'amplitude de la journée (1..7).
+                for t in range(1, N_SLOTS):
+                    # cours avant t (au moins un)
+                    avant = [occ(tp) for tp in range(0, t)]
+                    # cours en t ou après (au moins un)
+                    apres = [occ(tp) for tp in range(t, N_SLOTS)]
+                    a_avant = model.new_bool_var(f"{prefixe}av_{g_idx}_{d}_{t}")
+                    a_apres = model.new_bool_var(f"{prefixe}ap_{g_idx}_{d}_{t}")
+                    model.add(sum(avant) >= 1).only_enforce_if(a_avant)
+                    model.add(sum(avant) == 0).only_enforce_if(a_avant.Not())
+                    model.add(sum(apres) >= 1).only_enforce_if(a_apres)
+                    model.add(sum(apres) == 0).only_enforce_if(a_apres.Not())
+                    # trou si : créneau t vide, ET cours avant, ET cours après
+                    trou = model.new_bool_var(f"{prefixe}_{g_idx}_{d}_{t}")
+                    model.add(trou <= 1 - occ(t))
+                    model.add(trou <= a_avant)
+                    model.add(trou <= a_apres)
+                    model.add(trou >= a_avant + a_apres + (1 - occ(t)) - 2)
+                    malus.append(POIDS_TROU * trou)
 
     penaliser_trous(list(cl_svcs.values()), "tc")
     penaliser_trous(list(pr_svcs.values()), "tp")
+
+    # ── Option « matin de préférence » : chaque heure placée l'après-midi
+    # reçoit un petit malus, donc à compacité égale le moteur préfère
+    # remplir les matinées. Poids volontairement faible pour ne JAMAIS
+    # primer sur la compacité ni les contraintes dures.
+    if matin_prefere:
+        for s in range(len(services)):
+            for d in range(N_JOURS):
+                for t in SLOTS_APMIDI:
+                    malus.append(x[s, d, t])
 
     model.maximize(sum(bonus) - sum(malus))
 
@@ -329,16 +362,16 @@ def verifier(emplois, classes, permanents, services, indispos):
           f"{'aucun permanent' if nb == 0 else str(nb) + ' permanents placés !'}")
     ok = ok and nb == 0
 
-    # Trous dans les grilles classes
+    # Trous dans les grilles classes (sur la JOURNÉE entière : un créneau
+    # vide entouré de cours avant et après compte comme un trou, même s'il
+    # tombe sur l'heure du midi).
     trous = 0
     for cl in classes:
         for d in range(N_JOURS):
             occ = [(cl, d, t) in emplois for t in range(N_SLOTS)]
-            for plage in (range(1, 5), range(6, 8)):
-                for t in plage:
-                    if occ[t] and not occ[t - 1] \
-                       and any(occ[tp] for tp in range(plage.start - 1, t)):
-                        trous += 1
+            for t in range(1, N_SLOTS):
+                if not occ[t] and any(occ[:t]) and any(occ[t:]):
+                    trous += 1
     print(f"  {'✓' if trous == 0 else '!'} Trous dans les grilles : {trous}")
 
     # Jours imposés

@@ -369,13 +369,22 @@ with tab2:
             f"Prêt à placer **{sum(s['heures'] for s in services)} heures** "
             f"de cours pour **{len(classes)} classes**. "
             "Le moteur garantit : zéro conflit, volumes exacts, disponibilités "
-            "respectées, mercredi après-midi libéré pour les permanents."
+            "respectées, mercredi après-midi libéré pour les permanents, et "
+            "**journées compactes** (pas de cours isolé à 16h après une matinée vide)."
         )
         temps_max = st.slider(
             "Temps de calcul maximum (secondes)",
             min_value=30, max_value=300, value=90, step=30,
             help="Le moteur s'arrête dès qu'il trouve la meilleure solution. "
                  "Augmentez si votre établissement est très contraint.",
+        )
+        matin_prefere = st.checkbox(
+            "Privilégier les cours le matin (libérer les après-midis)",
+            value=False,
+            help="À cocher pour les établissements qui font cours surtout le "
+                 "matin. Le moteur remplit alors les matinées en priorité. "
+                 "Sans cette option, il regroupe les cours sans préférence "
+                 "matin/après-midi, mais toujours sans trou.",
         )
 
         deja = st.session_state.emplois is not None
@@ -391,6 +400,7 @@ with tab2:
                         emplois = moteur.resoudre(
                             classes, permanents, services, indispos,
                             temps_max=temps_max,
+                            matin_prefere=matin_prefere,
                         )
                     resultat["emplois"] = emplois
                 except Exception as e:           # garde-fou
