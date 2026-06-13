@@ -86,11 +86,20 @@ def lire_excel(chemin):
                   if _val(r, 0) and _val(r, 3) == "Permanent"}
 
     # ── Services ──
-    # Colonnes : A prof | B classe | C matière | D heures
-    #            E taille du bloc (optionnel : vide/Indifférent/2h/3h)
-    #            F jour imposé   (optionnel : vide ou Lundi…Vendredi)
+    # Colonnes obligatoires : Professeur | Classe | Matière | Heures / semaine
+    # Colonne optionnelle   : Jour imposé (Lundi…Vendredi ou vide)
+    # Note : la colonne « Taille du bloc » a été retirée du template (remplacée
+    # par la section « Durée des séances » dans l'onglet Paramètres). Pour la
+    # rétro-compatibilité, on la détecte encore si elle est présente.
     df = pd.read_excel(xls, "Services", skiprows=2, header=0)
     df = df.dropna(subset=[df.columns[0]])
+
+    # Détection des colonnes optionnelles par leur nom (insensible à la casse)
+    cols = {str(c).strip().lower(): i for i, c in enumerate(df.columns)}
+    idx_bloc = next((i for k, i in cols.items() if "bloc" in k), None)
+    idx_jour = next((i for k, i in cols.items()
+                     if "jour" in k or "imposé" in k or "impose" in k), None)
+
     services = []
     for _, r in df.iterrows():
         prof, classe, matiere = _val(r, 0), _val(r, 1), _val(r, 2)
@@ -100,9 +109,12 @@ def lire_excel(chemin):
             continue
         if not (prof and classe and matiere and heures > 0):
             continue
-        bv = _val(r, 4)
+        # Taille du bloc (rétro-compat, ignorée si colonne absente)
+        bv = _val(r, idx_bloc) if idx_bloc is not None else ""
         bloc_size = 3 if bv == "3h" else (2 if bv in ("2h", "Oui") else 1)
-        jour_impose = JOUR_INDEX.get(_val(r, 5))   # None si vide
+        # Jour imposé
+        jour_val = _val(r, idx_jour) if idx_jour is not None else ""
+        jour_impose = JOUR_INDEX.get(jour_val)   # None si vide
         services.append({"prof": prof, "classe": classe,
                          "matiere": matiere, "heures": heures,
                          "bloc_size": bloc_size,

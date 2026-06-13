@@ -299,9 +299,9 @@ with tab1:
             with open(FICHIER_EXEMPLE, "rb") as _f:
                 _data_exemple = _f.read()
             st.download_button(
-                label="🎓 Télécharger l'exemple rempli (Les Palmiers)",
+                label="📄 Télécharger un exemple de template",
                 data=_data_exemple,
-                file_name="exemple_ecole_les_palmiers.xlsx",
+                file_name="exemple_template_rempli.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 help="Un exemple complet et rempli pour voir comment structurer "
                      "votre fichier. Utilisez-le comme référence.",
@@ -319,7 +319,7 @@ with tab1:
                                    disabled=fichier is None, type="primary")
     with col_b:
         bouton_exemple = st.button(
-            "🎓 Essayer avec l'école d'exemple « Les Palmiers »",
+            "🎓 Essayer avec l'exemple du template déjà rempli",
             disabled=not os.path.exists(FICHIER_EXEMPLE),
         )
 
