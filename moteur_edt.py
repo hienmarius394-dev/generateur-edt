@@ -121,15 +121,87 @@ def lire_excel(chemin):
                 for s in slots:
                     indispos[prof].add((jour, s))
 
-    return classes, permanents, services, indispos
+    # ── Règles particulières (onglet Paramètres, section optionnelle) ──
+    regles = lire_regles_parametres(xls)
+
+    return classes, permanents, services, indispos, regles
+
+
+def _hhmm_en_minutes(texte):
+    """'11h00' ou '11:00' ou '11h' → minutes depuis minuit. None si illisible."""
+    t = str(texte).strip().lower().replace("h", ":")
+    if t.endswith(":"):
+        t += "00"
+    try:
+        h, m = t.split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+def creneaux_heures_chaudes(debut_txt, fin_txt):
+    """Indices de créneaux (0..N_SLOTS-1) qui chevauchent la plage interdite.
+    Un créneau est concerné dès qu'il déborde, même partiellement, dans la
+    plage — interdiction « large » assumée."""
+    deb = _hhmm_en_minutes(debut_txt)
+    fin = _hhmm_en_minutes(fin_txt)
+    if deb is None or fin is None or deb >= fin:
+        return set()
+    concernes = set()
+    for i, label in enumerate(SLOT_LABELS):
+        bornes = label.replace("–", "-").split("-")
+        c_deb = _hhmm_en_minutes(bornes[0])
+        c_fin = _hhmm_en_minutes(bornes[1])
+        if c_deb is None or c_fin is None:
+            continue
+        if c_deb < fin and c_fin > deb:          # chevauchement
+            concernes.add(i)
+    return concernes
+
+
+def lire_regles_parametres(xls):
+    """Lit la section 'RÈGLES PARTICULIÈRES' de l'onglet Paramètres.
+    Retourne un dict, par ex. {'eps_heures_chaudes': {0,1,...}} (créneaux
+    interdits pour l'EPS) ou {} si la règle est absente/désactivée."""
+    regles = {}
+    try:
+        df = pd.read_excel(xls, "Paramètres", header=None)
+    except Exception:
+        return regles
+
+    n_lignes, n_cols = df.shape
+    for i in range(n_lignes):
+        cellule = df.iat[i, 0]
+        if pd.isna(cellule):
+            continue
+        libelle = str(cellule).strip().lower()
+        if "eps" in libelle and "chaud" in libelle:
+            # colonnes : 0 libellé | 1 Activée ? | 2 début | 3 fin
+            def _c(j):
+                return "" if (j >= n_cols or pd.isna(df.iat[i, j])) \
+                    else str(df.iat[i, j]).strip()
+            active = _c(1).lower() in ("oui", "o", "yes", "true", "vrai", "1")
+            if active:
+                deb = _c(2) or "11h00"
+                fin = _c(3) or "16h00"
+                creneaux = creneaux_heures_chaudes(deb, fin)
+                if creneaux:
+                    regles["eps_heures_chaudes"] = creneaux
+            break
+    return regles
 
 
 # ════════════════════ 2. SOLVEUR ════════════════════
 def resoudre(classes, permanents, services, indispos, temps_max=120,
-             matin_prefere=False):
+             matin_prefere=False, regles=None):
     """matin_prefere : si True, le moteur préfère remplir les matinées et
     libérer les après-midis (utile pour les écoles « tout le matin »).
-    Dans tous les cas, la compacité des journées est fortement favorisée."""
+    Dans tous les cas, la compacité des journées est fortement favorisée.
+
+    regles : dict de règles particulières lues dans l'onglet Paramètres.
+      - 'eps_heures_chaudes' : ensemble de créneaux (0-based) où l'EPS est
+        strictement interdite (contrainte dure)."""
+    regles = regles or {}
     model = cp_model.CpModel()
 
     # ── Variable principale : x[s,d,t] = service s placé jour d, créneau t
@@ -233,6 +305,15 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
         else:
             # au moins une séance ce jour-là
             model.add(sum(x[s, d, t] for t in range(N_SLOTS)) >= 1)
+
+    # ── H8 : pas d'EPS aux heures chaudes (règle optionnelle de l'école) ──
+    creneaux_chauds = regles.get("eps_heures_chaudes", set())
+    if creneaux_chauds:
+        for s, svc in enumerate(services):
+            if svc["matiere"] == "EPS":
+                for d in range(N_JOURS):
+                    for t in creneaux_chauds:
+                        model.add(x[s, d, t] == 0)
 
     # ── Objectif : qualité pédagogique + compacité ──
     bonus, malus = [], []
@@ -540,16 +621,19 @@ if __name__ == "__main__":
     print("=" * 55)
 
     print("\n[1/4] Lecture des données…")
-    classes, permanents, services, indispos = lire_excel(entree)
+    classes, permanents, services, indispos, regles = lire_excel(entree)
     n_b2 = sum(1 for s in services if s["bloc_size"] == 2)
     n_b3 = sum(1 for s in services if s["bloc_size"] == 3)
     n_ji = sum(1 for s in services if s["jour_impose"] is not None)
     print(f"  {len(classes)} classes | {len(services)} services | "
           f"{sum(s['heures'] for s in services)}h à placer")
     print(f"  Blocs 2h : {n_b2} | Blocs 3h : {n_b3} | Jours imposés : {n_ji}")
+    if regles.get("eps_heures_chaudes"):
+        print(f"  Règle EPS heures chaudes : {len(regles['eps_heures_chaudes'])} "
+              "créneau(x) interdit(s)")
 
     print("\n[2/4] Résolution…")
-    emplois = resoudre(classes, permanents, services, indispos)
+    emplois = resoudre(classes, permanents, services, indispos, regles=regles)
     if not emplois:
         sys.exit(1)
 

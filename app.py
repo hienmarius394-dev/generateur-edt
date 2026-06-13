@@ -66,6 +66,7 @@ table.edt td.dst {outline: 3px dashed #e07b00; outline-offset: -3px;}
 # ════════════════════════ ÉTAT ════════════════════════
 defauts = {
     "donnees": None,        # (classes, permanents, services, indispos)
+    "regles": {},           # règles particulières lues dans l'Excel
     "meta": {},             # etablissement, annee, heures_max…
     "fichier_nom": None,
     "erreurs": [], "avertissements": [],
@@ -134,7 +135,7 @@ def lire_meta(chemin):
 def charger_fichier(chemin, nom_affiche):
     """Lit + valide le fichier ; remplit st.session_state. Retourne True si OK."""
     try:
-        classes, permanents, services, indispos = moteur.lire_excel(chemin)
+        classes, permanents, services, indispos, regles = moteur.lire_excel(chemin)
         meta = lire_meta(chemin)
     except Exception as e:
         st.session_state.erreurs = [
@@ -161,6 +162,7 @@ def charger_fichier(chemin, nom_affiche):
     st.session_state.erreurs = erreurs
     st.session_state.avertissements = avert
     st.session_state.meta = meta
+    st.session_state.regles = regles
     st.session_state.fichier_nom = nom_affiche
     if erreurs:
         st.session_state.donnees = None
@@ -330,6 +332,13 @@ with tab1:
             f"Vacataires : {len(set(profs) - permanents)}"
         )
 
+        # Règles particulières détectées dans le fichier
+        if st.session_state.regles.get("eps_heures_chaudes"):
+            n_cr = len(st.session_state.regles["eps_heures_chaudes"])
+            st.caption(f"🌞 Règle active : **pas d'EPS aux heures chaudes** "
+                       f"({n_cr} créneau(x) bloqué(s) pour l'EPS). "
+                       "Désactivable dans l'onglet Paramètres du fichier Excel.")
+
         if st.session_state.avertissements:
             with st.expander(f"⚠️ {len(st.session_state.avertissements)} point(s) "
                              "d'attention (non bloquants)"):
@@ -401,6 +410,7 @@ with tab2:
                             classes, permanents, services, indispos,
                             temps_max=temps_max,
                             matin_prefere=matin_prefere,
+                            regles=st.session_state.regles,
                         )
                     resultat["emplois"] = emplois
                 except Exception as e:           # garde-fou
@@ -424,13 +434,48 @@ with tab2:
             if resultat.get("exception"):
                 st.error(f"Erreur pendant la génération : {resultat['exception']}")
             elif resultat.get("emplois") is None:
-                st.error(
-                    "**Aucune solution trouvée.** Les contraintes sont "
-                    "incompatibles entre elles. Pistes : assouplir les jours "
-                    "imposés, vérifier les disponibilités des vacataires, "
-                    "réduire les volumes des professeurs les plus chargés, "
-                    "ou augmenter le temps de calcul."
-                )
+                # Diagnostic : est-ce la règle EPS qui rend tout impossible ?
+                coupable_eps = False
+                if st.session_state.regles.get("eps_heures_chaudes"):
+                    with st.spinner("Analyse de la cause du blocage…"):
+                        try:
+                            with redirect_stdout(io.StringIO()):
+                                test = moteur.resoudre(
+                                    classes, permanents, services, indispos,
+                                    temps_max=min(temps_max, 45),
+                                    matin_prefere=matin_prefere,
+                                    regles={},   # sans la règle EPS
+                                )
+                            coupable_eps = test is not None
+                        except Exception:
+                            coupable_eps = False
+
+                if coupable_eps:
+                    st.error(
+                        "**Impossible avec la règle « Pas d'EPS aux heures "
+                        "chaudes ».** Cette règle, telle que réglée, ne laisse "
+                        "pas assez de créneaux pour caser toutes les heures "
+                        "d'EPS — souvent parce qu'un seul professeur d'EPS doit "
+                        "couvrir beaucoup de classes."
+                    )
+                    st.info(
+                        "**Que faire ?**\n"
+                        "- Dans le fichier Excel, onglet **Paramètres**, mettez "
+                        "la règle EPS sur **Non** (ou élargissez la plage, par "
+                        "exemple 12h00–15h00 au lieu de 11h00–16h00), puis "
+                        "réimportez le fichier.\n"
+                        "- Ou ajoutez un second professeur d'EPS si possible.\n\n"
+                        "Sans cette règle, l'emploi du temps se génère "
+                        "normalement."
+                    )
+                else:
+                    st.error(
+                        "**Aucune solution trouvée.** Les contraintes sont "
+                        "incompatibles entre elles. Pistes : assouplir les jours "
+                        "imposés, vérifier les disponibilités des vacataires, "
+                        "réduire les volumes des professeurs les plus chargés, "
+                        "ou augmenter le temps de calcul."
+                    )
                 with st.expander("Journal du moteur"):
                     st.code(resultat.get("log", ""), language=None)
             else:
