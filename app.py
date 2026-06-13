@@ -333,8 +333,8 @@ with tab1:
         )
 
         # Règles particulières détectées dans le fichier
-        if st.session_state.regles.get("eps_heures_chaudes"):
-            n_cr = len(st.session_state.regles["eps_heures_chaudes"])
+        if st.session_state.get("regles", {}).get("eps_heures_chaudes"):
+            n_cr = len(st.session_state.get("regles", {})["eps_heures_chaudes"])
             st.caption(f"🌞 Règle active : **pas d'EPS aux heures chaudes** "
                        f"({n_cr} créneau(x) bloqué(s) pour l'EPS). "
                        "Désactivable dans l'onglet Paramètres du fichier Excel.")
@@ -410,7 +410,7 @@ with tab2:
                             classes, permanents, services, indispos,
                             temps_max=temps_max,
                             matin_prefere=matin_prefere,
-                            regles=st.session_state.regles,
+                            regles=st.session_state.get("regles", {}),
                         )
                     resultat["emplois"] = emplois
                 except Exception as e:           # garde-fou
@@ -436,7 +436,7 @@ with tab2:
             elif resultat.get("emplois") is None:
                 # Diagnostic : est-ce la règle EPS qui rend tout impossible ?
                 coupable_eps = False
-                if st.session_state.regles.get("eps_heures_chaudes"):
+                if st.session_state.get("regles", {}).get("eps_heures_chaudes"):
                     with st.spinner("Analyse de la cause du blocage…"):
                         try:
                             with redirect_stdout(io.StringIO()):
