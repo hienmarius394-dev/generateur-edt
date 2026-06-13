@@ -265,8 +265,11 @@ if meta.get("etablissement"):
 else:
     st.caption("Importez le fichier Excel rempli, générez, ajustez, imprimez.")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["**1 · Importer**", "**2 · Générer**", "**3 · Ajuster**", "**4 · Exporter**"]
+FICHIER_TEMPLATE = os.path.join(DOSSIER, "template_vierge.xlsx")
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["**1 · Importer**", "**2 · Générer**", "**3 · Ajuster**",
+     "**4 · Exporter**", "**❓ Aide**"]
 )
 
 # ════════════════════════ ÉCRAN 1 — IMPORTER ════════════════════════
@@ -276,6 +279,33 @@ with tab1:
         "Déposez le **template Excel rempli** (onglets Classes, Professeurs, "
         "Services, Disponibilités, Contraintes)."
     )
+
+    # ── Boutons téléchargement template vierge + exemple rempli ──
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        if os.path.exists(FICHIER_TEMPLATE):
+            with open(FICHIER_TEMPLATE, "rb") as _f:
+                _data_template = _f.read()
+            st.download_button(
+                label="📥 Télécharger le template vierge",
+                data=_data_template,
+                file_name="template_emplois_du_temps.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Téléchargez ce fichier, remplissez-le avec les données de votre "
+                     "école, puis importez-le ici.",
+            )
+    with dl_col2:
+        if os.path.exists(FICHIER_EXEMPLE):
+            with open(FICHIER_EXEMPLE, "rb") as _f:
+                _data_exemple = _f.read()
+            st.download_button(
+                label="🎓 Télécharger l'exemple rempli (Les Palmiers)",
+                data=_data_exemple,
+                file_name="exemple_ecole_les_palmiers.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Un exemple complet et rempli pour voir comment structurer "
+                     "votre fichier. Utilisez-le comme référence.",
+            )
 
     fichier = st.file_uploader(
         "Fichier Excel (.xlsx)", type=["xlsx"],
@@ -691,3 +721,157 @@ with tab4:
             "au format **A4 paysage**, sans couleur — adaptés à toutes les "
             "imprimantes et photocopieuses."
         )
+
+# ════════════════════════ ÉCRAN 5 — AIDE ════════════════════════
+with tab5:
+    st.subheader("Guide d'utilisation")
+    st.caption("Tout ce qu'il faut savoir pour générer un emploi du temps "
+               "avec cet outil, étape par étape.")
+
+    # ── C'est quoi cet outil ? ──
+    with st.expander("📌 C'est quoi cet outil ?", expanded=True):
+        st.markdown("""
+Cet outil génère automatiquement les emplois du temps d'une école à partir
+d'un fichier Excel que vous remplissez une seule fois.
+
+**Ce qu'il fait :**
+- Place chaque cours dans la semaine sans aucun conflit (un prof ne peut pas être dans deux classes en même temps)
+- Respecte les disponibilités des professeurs vacataires
+- Libère le mercredi après-midi pour les permanents (réunion pédagogique)
+- Regroupe les heures de chaque prof sur le moins de jours possible (utile pour les vacataires qui viennent de loin)
+- Produit des journées compactes sans trous pour les élèves
+
+**Ce qu'il ne fait pas :**
+- Il ne connaît pas les préférences personnelles des profs (sauf ce que vous renseignez dans le fichier)
+- Le résultat peut nécessiter quelques ajustements manuels à l'écran 3
+""")
+
+    # ── Les 4 étapes ──
+    with st.expander("🔢 Les 4 étapes en un coup d'œil"):
+        st.markdown("""
+**Étape 1 — Importer**
+Téléchargez le template vierge, remplissez-le avec les données de votre école,
+puis importez-le ici. L'outil vérifie vos données et vous signale les erreurs
+avant de commencer.
+
+**Étape 2 — Générer**
+Cliquez sur « Générer ». Le moteur calcule automatiquement la meilleure
+grille possible. Selon la taille de l'école, cela prend entre 30 secondes
+et 3 minutes.
+
+**Étape 3 — Ajuster**
+Visualisez la grille par classe ou par professeur. Si un cours ne vous convient
+pas, déplacez-le à la main. L'outil vérifie les conflits automatiquement.
+
+**Étape 4 — Exporter**
+Téléchargez les PDF (un par classe, un par prof) et l'Excel complet.
+Les PDF sont prêts à imprimer et afficher dans l'école.
+""")
+
+    # ── Comment remplir le template ──
+    with st.expander("📋 Comment remplir le template Excel ?"):
+        st.markdown("""
+Le template contient plusieurs onglets. Voici ce qu'il faut remplir dans chacun :
+
+**Onglet « Classes »**
+Une ligne par classe (ex : 6ème A, 1ère D, Tle D). Remplissez le nom exact,
+le niveau et la série si c'est une classe de lycée.
+
+**Onglet « Professeurs »**
+Un ligne par professeur. Précisez le nom exact (ex : M. KONÉ Mamadou),
+le statut (Permanent ou Vacataire) et éventuellement le nombre d'heures max
+par semaine.
+
+**Onglet « Services »**
+C'est l'onglet le plus important. Une ligne par cours :
+- Professeur (nom exact, identique à l'onglet Professeurs)
+- Classe (nom exact, identique à l'onglet Classes)
+- Matière
+- Heures par semaine
+- Taille du bloc (optionnel : 2h ou 3h pour forcer des heures consécutives)
+- Jour imposé (optionnel : Lundi, Mardi… pour forcer un jour précis)
+
+**Onglet « Disponibilités »**
+Indiquez les créneaux où chaque professeur n'est PAS disponible
+(matin ou après-midi, par jour). Laissez « Oui » si disponible, « Non » sinon.
+Crucial pour les vacataires qui ont un autre établissement.
+
+**Onglet « Paramètres »**
+Réglages de l'établissement : nom, année scolaire, créneaux horaires,
+règle EPS heures chaudes, et durée des séances par matière.
+""")
+
+    # ── Les règles importantes ──
+    with st.expander("⚙️ Les règles du moteur (ce qu'il respecte automatiquement)"):
+        st.markdown("""
+**Zéro conflit**
+Un professeur ne peut jamais être placé dans deux classes en même temps.
+Une classe ne peut jamais avoir deux cours en même temps.
+
+**Disponibilités des vacataires**
+Les créneaux marqués « Non » dans l'onglet Disponibilités sont strictement
+interdits pour le prof concerné.
+
+**Mercredi après-midi libéré**
+Les professeurs permanents ne sont jamais placés le mercredi après-midi
+(réunion pédagogique). Les vacataires peuvent l'être.
+
+**Journées compactes**
+Le moteur essaie de ne pas laisser de trous dans les journées des élèves.
+Un élève ne devrait pas avoir cours à 8h, puis à 16h seulement.
+
+**Regroupement des profs**
+Le moteur essaie de regrouper les heures de chaque prof sur le moins de jours
+possible — utile pour les vacataires qui font des trajets.
+
+**Durée des séances**
+Réglable par matière dans l'onglet Paramètres. Exemple : EPS = 2h exactement,
+SVT = 2h à 3h, Philosophie = 1h à 2h. Une séance est toujours en heures
+consécutives (jamais coupée).
+
+**EPS aux heures chaudes**
+Activable dans l'onglet Paramètres : interdit l'EPS entre 12h et 15h
+(heures de forte chaleur). Les plages horaires sont réglables.
+""")
+
+    # ── FAQ ──
+    with st.expander("❓ Questions fréquentes"):
+        st.markdown("""
+**« Mon emploi du temps est infaisable, pourquoi ? »**
+L'outil vous dit précisément pourquoi dans l'écran 1 (section erreurs).
+Les causes les plus courantes :
+- Un professeur a plus d'heures que de créneaux disponibles dans la semaine
+- Un volume horaire ne peut pas se découper avec la durée de séance imposée
+  (ex : 5h de physique avec des séances de 2h exactement → impossible)
+- Un jour imposé est incompatible avec les indisponibilités du prof ce jour-là
+
+**« Le prof vacataire a encore des journées éclatées »**
+Le moteur fait de son mieux selon les contraintes. Si un prof a beaucoup de
+classes, il peut être impossible de le regrouper sur 2 jours. Vous pouvez
+aussi limiter ses jours de disponibilité dans l'onglet Disponibilités.
+
+**« J'ai déplacé un cours et maintenant il y a un conflit »**
+L'outil vérifie les conflits avant d'appliquer chaque déplacement. Si le
+déplacement est refusé, il vous explique pourquoi. Si vous avez fait une
+erreur, le bouton « Annuler » revient à la situation précédente.
+
+**« Puis-je utiliser cet outil pour une école qui a cours le samedi ? »**
+Oui, modifiez les jours de cours dans l'onglet Paramètres du template.
+
+**« Le résultat change à chaque génération »**
+Oui, c'est normal. Il peut exister des milliers de grilles valides. Le moteur
+en trouve une bonne dans le temps imparti. Si vous n'êtes pas satisfait,
+vous pouvez relancer la génération ou ajuster manuellement à l'écran 3.
+
+**« Mes données sont-elles confidentielles ? »**
+Le fichier Excel que vous importez est traité localement par l'application.
+Il n'est pas envoyé à un serveur tiers ni stocké entre les sessions.
+""")
+
+    # ── Contact / signalement ──
+    st.divider()
+    st.caption(
+        "Un problème ? Une suggestion ? Contactez le développeur ou signalez "
+        "le bug directement sur "
+        "[GitHub](https://github.com/hienmarius394-dev/generateur-edt)."
+    )
