@@ -98,16 +98,49 @@ def valider_donnees(classes, permanents, services, indispos,
                 "Fusionnez les lignes (additionnez les heures)."
             )
 
-    # Charge par classe vs créneaux disponibles
+    # Charge par classe vs créneaux RÉELLEMENT disponibles.
+    # La capacité brute est de 40 créneaux (5j × 8h), mais le mercredi
+    # après-midi (3 créneaux) est interdit aux professeurs permanents. Pour
+    # une classe donnée, ces 3 créneaux ne sont utilisables que si elle a au
+    # moins un professeur VACATAIRE pouvant les couvrir. On calcule donc la
+    # capacité réelle classe par classe pour éviter un angle mort : une classe
+    # à 38h tous permanents passerait « 38 ≤ 40 » alors que sa vraie capacité
+    # est 37 → le solveur échouerait sans message clair.
     h_classe = defaultdict(int)
+    profs_de_classe = defaultdict(set)
     for s in services:
         h_classe[s["classe"]] += s["heures"]
+        profs_de_classe[s["classe"]].add(s["prof"])
+
     for c in classes:
-        if h_classe[c] > CRENEAUX_SEMAINE:
-            erreurs.append(
-                f"Classe {c} : {h_classe[c]}h demandées pour seulement "
-                f"{CRENEAUX_SEMAINE} créneaux par semaine. Réduisez les volumes."
+        # Créneaux mercredi après-midi réellement exploitables pour CETTE classe
+        merc_pm_utilisables = 0
+        for t in SLOTS_APMIDI:
+            # un créneau merc PM est utilisable s'il existe un vacataire de la
+            # classe disponible à ce créneau
+            dispo_vacataire = any(
+                (p not in permanents) and ((2, t) not in indispos.get(p, set()))
+                for p in profs_de_classe[c]
             )
+            if dispo_vacataire:
+                merc_pm_utilisables += 1
+        capacite_classe = CRENEAUX_SEMAINE - (len(SLOTS_APMIDI) - merc_pm_utilisables)
+
+        if h_classe[c] > capacite_classe:
+            if capacite_classe < CRENEAUX_SEMAINE:
+                erreurs.append(
+                    f"Classe {c} : {h_classe[c]}h demandées mais seulement "
+                    f"{capacite_classe} créneaux réellement disponibles "
+                    f"(le mercredi après-midi est réservé aux vacataires, et "
+                    f"cette classe n'en a pas assez pour le couvrir). "
+                    f"Réduisez les volumes ou affectez un vacataire au "
+                    f"mercredi après-midi."
+                )
+            else:
+                erreurs.append(
+                    f"Classe {c} : {h_classe[c]}h demandées pour seulement "
+                    f"{capacite_classe} créneaux par semaine. Réduisez les volumes."
+                )
         elif h_classe[c] == 0:
             avertissements.append(f"Classe {c} : aucun service ne lui est affecté.")
 

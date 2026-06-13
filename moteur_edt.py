@@ -430,6 +430,38 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
                 model.add(x[s, 2, t] == 0)
 
     # ── H6 : limite journalière pour les services à durée « libre » ──
+
+    # ── H6b (préférence forte) : éviter qu'une classe ait exactement 1h le ──
+    # ── mercredi. Une classe qui n'a qu'1h ce jour-là se déplace pour une   ──
+    # ── seule heure de cours, ce qui n'a aucun sens pédagogique.            ──
+    # Choix de conception : PÉNALITÉ FORTE plutôt qu'interdiction absolue. Une
+    # contrainte dure « 0 ou >=2 » peut rendre le problème infaisable dans des
+    # cas tendus (ex : une matière d'1h imposée le mercredi alors que les autres
+    # profs sont indisponibles ce jour). Une pénalité forte donne le même
+    # résultat en pratique — le solveur évite le mercredi à 1h dès qu'il le peut
+    # — sans jamais bloquer la génération. Le poids est très supérieur aux
+    # autres pénalités pour que ce soit évité en priorité.
+    # On compte TOUTE la journée (matin + après-midi vacataires).
+    POIDS_MERC_1H = 50
+    merc_penalites = []
+    for cl, s_list in cl_svcs.items():
+        heures_merc = sum(x[s, 2, t] for s in s_list for t in range(N_SLOTS))
+        # est_1h = 1 si la classe a exactement 1h le mercredi.
+        est_1h = model.new_bool_var(f"merc_1h_{cl}")
+        # Lien : est_1h ⇔ (heures_merc == 1). On l'encode avec deux implications
+        # via une variable auxiliaire « au moins 1h » et « au moins 2h ».
+        au_moins_1 = model.new_bool_var(f"merc_ge1_{cl}")
+        au_moins_2 = model.new_bool_var(f"merc_ge2_{cl}")
+        model.add(heures_merc >= 1).only_enforce_if(au_moins_1)
+        model.add(heures_merc == 0).only_enforce_if(au_moins_1.Not())
+        model.add(heures_merc >= 2).only_enforce_if(au_moins_2)
+        model.add(heures_merc <= 1).only_enforce_if(au_moins_2.Not())
+        # exactement 1h = (au_moins_1) ET (NON au_moins_2)
+        model.add(est_1h == 1).only_enforce_if([au_moins_1, au_moins_2.Not()])
+        model.add(est_1h == 0).only_enforce_if(au_moins_1.Not())
+        model.add(est_1h == 0).only_enforce_if(au_moins_2)
+        merc_penalites.append(POIDS_MERC_1H * est_1h)
+
     # Un service dont la séance n'est pas contrainte (seance_min == 1 et
     # seance_max == total) ne doit pas s'entasser : on garde l'ancienne règle
     # « ≤ 2h par jour » pour étaler la matière sur la semaine. Les services
@@ -549,7 +581,7 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
                 for t in SLOTS_APMIDI:
                     malus.append(x[s, d, t])
 
-    model.maximize(sum(bonus) - sum(malus))
+    model.maximize(sum(bonus) - sum(malus) - sum(merc_penalites))
 
     # ── Résolution ──
     solver = cp_model.CpSolver()
