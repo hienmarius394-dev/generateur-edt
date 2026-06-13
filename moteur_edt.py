@@ -108,6 +108,27 @@ def lire_excel(chemin):
                          "bloc_size": bloc_size,
                          "jour_impose": jour_impose})
 
+    # ── Durées de séance par matière (onglet Paramètres, optionnel) ──
+    # Applique une plage [min, max] d'heures consécutives par séance à chaque
+    # service de la matière concernée. Voir lire_durees_seances().
+    durees = lire_durees_seances(xls)
+    for svc in services:
+        dmin, dmax = durees.get(svc["matiere"], (None, None))
+        # Valeur effective : la règle de l'onglet prime ; sinon on déduit de
+        # l'ancienne colonne « bloc » (rétro-compatibilité), sinon libre (1..H).
+        if dmin is None:
+            # Rétro-compatibilité : l'ancienne colonne « bloc Nh » signifiait
+            # « regrouper par paquets d'AU PLUS N heures » (avec reste possible),
+            # pas « tout en séances de N pile ». On traduit donc bloc N → max N,
+            # min 1. Sans bloc → durée libre (1..H).
+            b = svc["bloc_size"]
+            dmin, dmax = (1, b) if b >= 2 else (1, svc["heures"])
+        # Bornage de sécurité : une séance ne peut excéder le total d'heures.
+        dmax = min(dmax, svc["heures"])
+        dmin = min(dmin, dmax)
+        svc["seance_min"] = max(1, dmin)
+        svc["seance_max"] = max(svc["seance_min"], dmax)
+
     # ── Disponibilités (demi-journées NON = indisponible) ──
     df = pd.read_excel(xls, "Disponibilités", skiprows=2, header=0)
     df = df.dropna(subset=[df.columns[0]])
@@ -157,6 +178,95 @@ def creneaux_heures_chaudes(debut_txt, fin_txt):
         if c_deb < fin and c_fin > deb:          # chevauchement
             concernes.add(i)
     return concernes
+
+
+def _heures_depuis_texte(txt):
+    """Extrait un nombre d'heures d'une cellule : '2', '2h', '3 h' → 2 ou 3.
+    Retourne None si rien d'exploitable."""
+    if txt is None:
+        return None
+    s = str(txt).strip().lower().replace("h", " ").replace(",", ".")
+    s = s.split()[0] if s.split() else ""
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return int(round(v)) if v > 0 else None
+
+
+def lire_durees_seances(xls):
+    """Lit la section « DURÉE DES SÉANCES PAR MATIÈRE » de l'onglet Paramètres.
+
+    Format attendu (tolérant) — un tableau à 3 colonnes :
+        Matière | Durée min séance | Durée max séance
+        SVT     | 2                | 3
+        Physique-Chimie | 2        | 2
+        Philosophie     | 1        | 2
+
+    Retourne {matiere: (min, max)} en heures. Section absente → {} (le moteur
+    se comporte alors comme avant : déduit des blocs ou décide librement).
+    Lignes incomplètes ou non numériques ignorées silencieusement.
+    """
+    durees = {}
+    try:
+        df = pd.read_excel(xls, "Paramètres", header=None)
+    except Exception:
+        return durees
+
+    n_lignes, n_cols = df.shape
+    if n_cols < 3:
+        return durees
+
+    # Repérer la ligne-titre de la section.
+    debut = None
+    for i in range(n_lignes):
+        cell = df.iat[i, 0]
+        if pd.isna(cell):
+            continue
+        lib = str(cell).strip().lower()
+        if "durée" in lib and "séance" in lib and "matière" in lib:
+            debut = i
+            break
+        # tolère sans accents
+        if "duree" in lib and "seance" in lib and "matiere" in lib:
+            debut = i
+            break
+    if debut is None:
+        return durees
+
+    # Lire les lignes suivantes. On saute la ligne d'explication et la ligne
+    # d'en-têtes ; on s'arrête à une ligne entièrement vide ou à une nouvelle
+    # section (texte long sans valeurs numériques rencontré APRÈS des données).
+    donnees_vues = False
+    for i in range(debut + 1, n_lignes):
+        c0 = df.iat[i, 0]
+        if pd.isna(c0):
+            if donnees_vues:
+                break          # ligne vide après les données → fin du tableau
+            continue           # ligne vide avant les données → on continue
+        nom = str(c0).strip()
+        bas = nom.lower()
+
+        vmin = _heures_depuis_texte(df.iat[i, 1] if n_cols > 1 else None)
+        vmax = _heures_depuis_texte(df.iat[i, 2] if n_cols > 2 else None)
+
+        if vmin is None and vmax is None:
+            # Pas de valeurs : soit en-tête / explication (avant données),
+            # soit nouvelle section (après données → on arrête).
+            if donnees_vues:
+                break
+            continue
+        # Ignorer une éventuelle ligne d'en-têtes glissée ici.
+        if bas in ("matière", "matiere"):
+            continue
+        if vmin is None:
+            vmin = vmax
+        if vmax is None:
+            vmax = vmin
+        if vmin and vmax:
+            durees[nom] = (min(vmin, vmax), max(vmin, vmax))
+            donnees_vues = True
+    return durees
 
 
 def lire_regles_parametres(xls):
@@ -211,51 +321,72 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
             for t in range(N_SLOTS):
                 x[s, d, t] = model.new_bool_var(f"x_{s}_{d}_{t}")
 
-    # ── Blocs de B heures consécutives (B = 2 ou 3) ──
-    # NOTE : les blocs PEUVENT traverser la pause déjeuner (choix assumé).
-    bloc_st = {}
+    # ── Séances : suites d'heures consécutives d'un même service ──
+    # Chaque service est découpé en séances dont la durée est comprise entre
+    # seance_min et seance_max (réglable par matière dans l'onglet Paramètres).
+    # On crée une variable de DÉBUT par taille autorisée et par position.
+    # NOTE : une séance PEUT traverser la pause déjeuner (choix assumé).
+    #
+    #   debut[s, k, d, t] = 1  ⇔  une séance de durée k du service s commence
+    #                              le jour d au créneau t (couvre t..t+k-1).
+    #
+    # Pour le jour imposé et la compacité, on garde une trace du début des
+    # séances « longues » (k >= 2) via seance_long_start.
+    debut = {}                 # (s, k, d, t) -> bool var
+    seance_long_start = defaultdict(list)   # s -> liste de (d, t, k, var) pour k>=2
     for s, svc in enumerate(services):
-        B = svc["bloc_size"]
-        if B < 2:
-            continue
-        n_blocs = svc["heures"] // B
-        n_extra = svc["heures"] % B
+        smin = svc["seance_min"]
+        smax = svc["seance_max"]
+        H = svc["heures"]
+        tailles = list(range(smin, smax + 1))
 
-        for d in range(N_JOURS):
-            for t in range(N_SLOTS - B + 1):
-                bloc_st[s, d, t] = model.new_bool_var(f"b{B}_{s}_{d}_{t}")
-
-        extra = {}
-        if n_extra:
+        # Variables de début pour chaque taille / position valide.
+        for k in tailles:
             for d in range(N_JOURS):
-                for t in range(N_SLOTS):
-                    extra[d, t] = model.new_bool_var(f"e_{s}_{d}_{t}")
-            model.add(sum(extra.values()) == n_extra)
+                for t in range(N_SLOTS - k + 1):
+                    v = model.new_bool_var(f"deb_{s}_{k}_{d}_{t}")
+                    debut[s, k, d, t] = v
+                    if k >= 2:
+                        seance_long_start[s].append((d, t, k, v))
 
-        model.add(sum(bloc_st[s, d, t]
-                      for d in range(N_JOURS)
-                      for t in range(N_SLOTS - B + 1)) == n_blocs)
-
-        # Blocs sans chevauchement
-        for d in range(N_JOURS):
-            for t in range(N_SLOTS - B + 1):
-                for off in range(1, B):
-                    if t + off <= N_SLOTS - B:
-                        model.add(bloc_st[s, d, t]
-                                  + bloc_st[s, d, t + off] <= 1)
-
-        # Lien x = couverture des blocs + heures isolées
+        # (a) Couverture : x[s,d,t] = somme des séances qui recouvrent (d,t).
         for d in range(N_JOURS):
             for t in range(N_SLOTS):
-                cov = [bloc_st[s, d, ts]
-                       for ts in range(max(0, t - B + 1),
-                                       min(N_SLOTS - B, t) + 1)]
-                ext = [extra[d, t]] if n_extra else []
-                model.add(x[s, d, t] == sum(cov) + sum(ext))
+                recouvrants = []
+                for k in tailles:
+                    for ts in range(max(0, t - k + 1), min(N_SLOTS - k, t) + 1):
+                        recouvrants.append(debut[s, k, d, ts])
+                model.add(x[s, d, t] == sum(recouvrants))
 
-        # ≤ B heures de ce service par jour
+        # (b) Volume exact via les séances : Σ (k · nb séances de taille k) = H.
+        model.add(
+            sum(k * debut[s, k, d, t]
+                for k in tailles
+                for d in range(N_JOURS)
+                for t in range(N_SLOTS - k + 1)) == H
+        )
+
+        # (c) Pas de chevauchement de séances le même jour : sur chaque créneau,
+        #     au plus une heure du service (déjà garanti par x ≤ 1 plus bas via
+        #     H2/H3, mais on borne aussi x[s] lui-même pour la cohérence).
         for d in range(N_JOURS):
-            model.add(sum(x[s, d, t] for t in range(N_SLOTS)) <= B)
+            for t in range(N_SLOTS):
+                model.add(x[s, d, t] <= 1)
+
+        # (d) AU PLUS UNE séance par jour pour ce service, quelle que soit sa
+        #     taille. Conséquence : deux heures d'une même matière le même jour
+        #     pour une classe sont forcément CONSÉCUTIVES (une seule séance),
+        #     jamais éclatées (pas de « maths à 8h puis maths à 11h »). Une
+        #     matière de 5h en séances de 1–2h se répartit donc sur ≥3 jours.
+        for d in range(N_JOURS):
+            model.add(
+                sum(debut[s, k, d, t]
+                    for k in tailles
+                    for t in range(N_SLOTS - k + 1)) <= 1
+            )
+        # Le total d'heures du jour ne dépasse jamais la plus grande séance.
+        for d in range(N_JOURS):
+            model.add(sum(x[s, d, t] for t in range(N_SLOTS)) <= smax)
 
     # ── H1 : volume horaire exact ──
     for s, svc in enumerate(services):
@@ -286,9 +417,15 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
             for t in SLOTS_APMIDI:
                 model.add(x[s, 2, t] == 0)
 
-    # ── H6 : ≤ 2h par jour pour les services sans bloc ──
+    # ── H6 : limite journalière pour les services à durée « libre » ──
+    # Un service dont la séance n'est pas contrainte (seance_min == 1 et
+    # seance_max == total) ne doit pas s'entasser : on garde l'ancienne règle
+    # « ≤ 2h par jour » pour étaler la matière sur la semaine. Les services
+    # avec une durée de séance explicite (k>=2) sont déjà bornés à smax/jour.
     for s, svc in enumerate(services):
-        if svc["bloc_size"] == 1:
+        libre = (svc["seance_min"] == 1 and svc["seance_max"] >= svc["heures"]
+                 and svc["heures"] >= 2)
+        if libre:
             for d in range(N_JOURS):
                 model.add(sum(x[s, d, t] for t in range(N_SLOTS)) <= 2)
 
@@ -297,11 +434,15 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
         d = svc["jour_impose"]
         if d is None:
             continue
-        B = svc["bloc_size"]
-        if B >= 2 and svc["heures"] >= B:
-            # le bloc doit commencer ce jour-là
-            model.add(sum(bloc_st[s, d, t]
-                          for t in range(N_SLOTS - B + 1)) >= 1)
+        if svc["seance_max"] >= 2 and svc["heures"] >= svc["seance_min"]:
+            # au moins une séance longue (k>=2) commence ce jour-là si possible,
+            # sinon au moins une heure ce jour-là (cas où seules des 1h tiennent)
+            longues_ce_jour = [v for (dd, t, k, v) in seance_long_start[s]
+                               if dd == d]
+            if longues_ce_jour:
+                model.add(sum(longues_ce_jour) >= 1)
+            else:
+                model.add(sum(x[s, d, t] for t in range(N_SLOTS)) >= 1)
         else:
             # au moins une séance ce jour-là
             model.add(sum(x[s, d, t] for t in range(N_SLOTS)) >= 1)
@@ -363,6 +504,28 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
 
     penaliser_trous(list(cl_svcs.values()), "tc")
     penaliser_trous(list(pr_svcs.values()), "tp")
+
+    # ── Regroupement des profs : pénaliser le NOMBRE DE JOURS de présence ──
+    # Pour chaque prof, on minimise le nombre de jours où il vient. Un prof à
+    # 12h gagne à venir 2-3 jours pleins plutôt que 5 demi-journées : crucial
+    # pour les vacataires venant d'un autre établissement (trajets). C'est une
+    # PRÉFÉRENCE (pénalité), pas une contrainte dure : le moteur regroupe quand
+    # il le peut sans jamais rendre la grille infaisable.
+    #
+    # Poids volontairement INFÉRIEUR à POIDS_TROU : on n'accepte jamais de créer
+    # un trou dans la grille d'une CLASSE pour économiser un jour à un prof. Le
+    # confort élève prime sur le confort enseignant.
+    POIDS_JOUR_PROF = 3
+    present = {}
+    for prof, s_list in pr_svcs.items():
+        for d in range(N_JOURS):
+            p = model.new_bool_var(f"prof_present_{prof}_{d}")
+            present[prof, d] = p
+            # p = 1 si au moins un cours ce jour, 0 sinon (lien exact).
+            heures_jour = [x[s, d, t] for s in s_list for t in range(N_SLOTS)]
+            model.add(sum(heures_jour) >= 1).only_enforce_if(p)
+            model.add(sum(heures_jour) == 0).only_enforce_if(p.Not())
+            malus.append(POIDS_JOUR_PROF * p)
 
     # ── Option « matin de préférence » : chaque heure placée l'après-midi
     # reçoit un petit malus, donc à compacité égale le moteur préfère
@@ -463,20 +626,25 @@ def verifier(emplois, classes, permanents, services, indispos):
         slots = sorted(t for t in range(N_SLOTS)
                        if emplois.get((s["classe"], d, t), {}).get("prof") == s["prof"]
                        and emplois[(s["classe"], d, t)]["matiere"] == s["matiere"])
-        B = s["bloc_size"]
-        if B >= 2 and s["heures"] >= B:
-            # chercher B créneaux consécutifs
-            run, best = 1, 1 if slots else 0
+        # Nouvelle règle (durées de séance souples) : le jour imposé garantit
+        # qu'AU MOINS UNE séance de la matière tombe ce jour-là. On vérifie donc
+        # la présence d'au moins seance_min heures, consécutives si possible.
+        smin = s.get("seance_min", s["bloc_size"] if s["bloc_size"] >= 2 else 1)
+        if slots:
+            run, best = 1, 1
             for i in range(1, len(slots)):
                 run = run + 1 if slots[i] == slots[i - 1] + 1 else 1
                 best = max(best, run)
-            respecte = best >= B
         else:
-            respecte = len(slots) >= 1
+            best = 0
+        # Respecté si au moins une séance de durée >= seance_min est présente
+        # (ou, pour les matières à durée libre, au moins 1h ce jour-là).
+        respecte = best >= max(1, smin) if smin >= 2 else len(slots) >= 1
         sym = "✓" if respecte else "✗"
+        taille_txt = (f", séance de {best}h présente"
+                      if respecte and best >= 2 else "")
         print(f"  {sym} Jour imposé : {s['matiere']} {s['classe']} "
-              f"→ {JOURS[d]} ({len(slots)}h placées"
-              f"{', bloc de ' + str(B) + 'h présent' if B >= 2 and respecte else ''})")
+              f"→ {JOURS[d]} ({len(slots)}h placées{taille_txt})")
         ok = ok and respecte
 
     return ok

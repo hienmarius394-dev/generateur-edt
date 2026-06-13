@@ -17,6 +17,26 @@ from moteur_edt import (
 CRENEAUX_SEMAINE = N_JOURS * N_SLOTS  # 40
 
 
+def _decoupage_possible(H, smin, smax):
+    """True s'il existe une façon de découper H heures en séances dont chaque
+    durée est comprise entre smin et smax (inclus). Sert à prévenir l'école
+    AVANT de lancer le solveur quand un volume est incompatible avec la durée
+    de séance imposée (ex: 5h de physique en séances de 2h pile → impossible)."""
+    if H <= 0:
+        return True
+    smin = max(1, smin)
+    smax = max(smin, smax)
+    # Programmation dynamique : atteignable[h] = on peut composer h heures.
+    atteignable = [False] * (H + 1)
+    atteignable[0] = True
+    for h in range(1, H + 1):
+        for k in range(smin, min(smax, h) + 1):
+            if atteignable[h - k]:
+                atteignable[h] = True
+                break
+    return atteignable[H]
+
+
 # ════════════════ VALIDATION DES DONNÉES IMPORTÉES ════════════════
 def valider_donnees(classes, permanents, services, indispos,
                     profs_declares=None, heures_max=None,
@@ -120,6 +140,39 @@ def valider_donnees(classes, permanents, services, indispos,
                 f"{s['matiere']} en {s['classe']} ({s['prof']}) : {s['heures']}h "
                 f"en blocs de {b}h → {s['heures'] // b} bloc(s) + "
                 f"{s['heures'] % b}h isolée(s)."
+            )
+
+    # Durée de séance imposée incompatible avec le volume horaire (BLOQUANT).
+    # Ex : Physique 5h avec séances de 2h pile → 5 ne se découpe pas en 2.
+    for s in services:
+        smin = s.get("seance_min")
+        smax = s.get("seance_max")
+        if smin is None or smax is None:
+            continue
+        # Ne signaler que si une vraie contrainte est posée (pas le cas libre).
+        contrainte_posee = not (smin == 1 and smax >= s["heures"])
+        if contrainte_posee and not _decoupage_possible(s["heures"], smin, smax):
+            if smin == smax:
+                detail = f"séances de {smin}h exactement"
+            else:
+                detail = f"séances de {smin}h à {smax}h"
+            erreurs.append(
+                f"{s['matiere']} en {s['classe']} ({s['prof']}) : "
+                f"{s['heures']}h ne peut pas se découper en {detail}. "
+                f"Ajustez le volume horaire ou la durée de séance de cette "
+                f"matière dans l'onglet Paramètres."
+            )
+        # Volume trop élevé pour tenir en une séance par jour sur la semaine.
+        # (Le moteur place au plus UNE séance de la matière par jour pour
+        #  garder les heures consécutives ; au-delà de seance_max × nb_jours,
+        #  c'est mathématiquement impossible.)
+        elif smax * N_JOURS < s["heures"]:
+            erreurs.append(
+                f"{s['matiere']} en {s['classe']} ({s['prof']}) : "
+                f"{s['heures']}h impossible avec des séances d'au plus {smax}h. "
+                f"Une matière n'a qu'une séance par jour, donc au maximum "
+                f"{smax * N_JOURS}h par semaine ({smax}h × {N_JOURS} jours). "
+                f"Augmentez la durée max de séance ou réduisez le volume."
             )
 
     # Jours imposés mal orthographiés (détectés à la lecture du fichier)
