@@ -334,7 +334,7 @@ with tab1:
 
     if bouton_exemple:
         with st.spinner("Chargement de l'exemple…"):
-            charger_fichier(FICHIER_EXEMPLE, "École d'exemple « Les Palmiers »")
+            charger_fichier(FICHIER_EXEMPLE, "Exemple — Lycée Moderne de Cocody")
 
     # ── Résultat de la validation ──
     if st.session_state.erreurs:
