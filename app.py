@@ -11,6 +11,7 @@ import os
 import time
 import tempfile
 import threading
+from datetime import datetime
 from contextlib import redirect_stdout
 
 import pandas as pd
@@ -22,6 +23,16 @@ from moteur_edt import (
 )
 import verification as verif
 import export_pdf
+import persistance as persist
+
+# Composant de stockage navigateur (survit aux coupures réseau / fermeture
+# d'onglet). Import protégé : si le paquet manque, l'app marche quand même
+# (sans sauvegarde auto) au lieu de planter.
+try:
+    from streamlit_local_storage import LocalStorage
+    _STORAGE_DISPO = True
+except Exception:
+    _STORAGE_DISPO = False
 
 DOSSIER = os.path.dirname(os.path.abspath(__file__))
 FICHIER_EXEMPLE = os.path.join(DOSSIER, "donnees_exemple.xlsx")
@@ -76,9 +87,112 @@ defauts = {
     "historique": [],       # pile pour Annuler
     "nb_modifs": 0,
     "chaine": [],           # liste de (src, dst) en attente de validation groupée
+    "versions": [],         # versions nommées enregistrées par l'utilisateur
 }
 for k, v in defauts.items():
     st.session_state.setdefault(k, v)
+
+
+# ════════════════════════ SAUVEGARDE AUTOMATIQUE (navigateur) ════════════════════════
+# Objectif : ne JAMAIS perdre le travail si la connexion saute ou si l'onglet
+# se ferme. L'état des 4 écrans est stocké dans le localStorage du navigateur,
+# puis restauré automatiquement au retour.
+def _init_storage():
+    if not _STORAGE_DISPO:
+        return None
+    if "_ls" not in st.session_state:
+        # instanceId fixe pour viser TOUJOURS la même clé entre les sessions
+        st.session_state._ls = LocalStorage()
+    return st.session_state._ls
+
+
+def restaurer_si_besoin():
+    """Au tout premier passage de la session, tente de recharger l'état
+    sauvegardé dans le navigateur. Sans effet les fois suivantes."""
+    if st.session_state.get("_restauration_faite"):
+        return
+    ls = _init_storage()
+    if ls is None:
+        st.session_state._restauration_faite = True
+        return
+    try:
+        texte = ls.getItem(persist.CLE_STORAGE)
+    except Exception:
+        texte = None
+    if texte:
+        etat = persist.deserialiser_etat(texte)
+        if etat and (etat.get("donnees") or etat.get("emplois")):
+            for cle, valeur in etat.items():
+                st.session_state[cle] = valeur
+            st.session_state._sauvegarde_restauree = True
+            # mémoriser l'empreinte pour ne pas réécrire inutilement juste après
+            st.session_state._derniere_empreinte = persist.empreinte(texte)
+    st.session_state._restauration_faite = True
+
+
+def sauvegarder_si_change():
+    """Réécrit l'état dans le navigateur UNIQUEMENT s'il a changé depuis la
+    dernière sauvegarde (empreinte). Appelé en fin de script."""
+    ls = _init_storage()
+    if ls is None:
+        return
+    texte = persist.serialiser_etat(st.session_state)
+    if texte is None:
+        return
+    emp = persist.empreinte(texte)
+    if emp == st.session_state.get("_derniere_empreinte"):
+        return  # rien n'a changé : on n'écrit pas (évite de ralentir)
+    try:
+        ls.setItem(persist.CLE_STORAGE, texte, key="edt_save")
+        st.session_state._derniere_empreinte = emp
+    except Exception:
+        pass  # un échec d'écriture ne doit jamais casser l'app
+
+
+def effacer_sauvegarde():
+    """Supprime la sauvegarde navigateur (bouton « repartir de zéro »)."""
+    ls = _init_storage()
+    if ls is not None:
+        try:
+            ls.deleteItem(persist.CLE_STORAGE)
+        except Exception:
+            pass
+    st.session_state._derniere_empreinte = None
+    st.session_state._sauvegarde_restauree = False
+
+
+# ── Versions nommées (historique) : chargement + écriture navigateur ──
+def charger_versions():
+    """Lit la liste des versions enregistrées depuis le navigateur.
+    Met à jour st.session_state.versions (une seule lecture par session)."""
+    if "versions" in st.session_state and st.session_state.get("_versions_chargees"):
+        return st.session_state.versions
+    ls = _init_storage()
+    versions = []
+    if ls is not None:
+        try:
+            texte = ls.getItem(persist.CLE_VERSIONS)
+            versions = persist.texte_vers_versions(texte)
+        except Exception:
+            versions = []
+    st.session_state.versions = versions
+    st.session_state._versions_chargees = True
+    return versions
+
+
+def ecrire_versions(versions):
+    """Écrit la liste des versions dans le navigateur et en session."""
+    st.session_state.versions = versions
+    ls = _init_storage()
+    if ls is not None:
+        try:
+            ls.setItem(persist.CLE_VERSIONS, persist.versions_vers_texte(versions),
+                       key="edt_versions_save")
+        except Exception:
+            pass
+
+
+restaurer_si_besoin()
 
 
 # ════════════════════════ LECTURES COMPLÉMENTAIRES ════════════════════════
@@ -276,6 +390,32 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # ════════════════════════ ÉCRAN 1 — IMPORTER ════════════════════════
 with tab1:
     st.subheader("Importer le fichier de données")
+
+    # ── Bandeau « travail restauré » (sauvegarde navigateur) ──
+    if st.session_state.get("_sauvegarde_restauree"):
+        c_info, c_btn = st.columns([4, 1])
+        with c_info:
+            quoi = []
+            if st.session_state.get("emplois"):
+                quoi.append("emploi du temps")
+            if st.session_state.get("nb_modifs"):
+                quoi.append(f"{st.session_state['nb_modifs']} ajustement(s)")
+            detail = " et ".join(quoi) if quoi else "votre travail"
+            st.success(f"✅ Travail restauré automatiquement ({detail}). "
+                       "Vous pouvez reprendre où vous en étiez.")
+        with c_btn:
+            if st.button("🗑 Effacer", help="Supprime la sauvegarde du navigateur "
+                         "et repart de zéro."):
+                effacer_sauvegarde()
+                for k in list(defauts.keys()):
+                    st.session_state[k] = defauts[k]
+                st.session_state._sauvegarde_restauree = False
+                st.rerun()
+    elif _STORAGE_DISPO and (st.session_state.get("donnees")
+                             or st.session_state.get("emplois")):
+        st.caption("💾 Sauvegarde automatique active — votre travail est "
+                   "conservé dans ce navigateur même en cas de coupure.")
+
     st.write(
         "Déposez le **template Excel rempli** (onglets Classes, Professeurs, "
         "Services, Disponibilités, Contraintes)."
@@ -550,6 +690,87 @@ with tab3:
         classes, permanents, services, indispos = st.session_state.donnees
         emplois = st.session_state.emplois
         profs = sorted({i["prof"] for i in emplois.values()})
+
+        # ════════════ VERSIONS ENREGISTRÉES (historique nommé) ════════════
+        versions = charger_versions()
+        with st.expander(f"🗂️ Versions enregistrées ({len(versions)})",
+                         expanded=False):
+            st.caption(
+                "Enregistrez l'emploi du temps actuel sous un nom pour le "
+                "retrouver plus tard. Pratique pour comparer plusieurs "
+                "organisations sans rien perdre."
+            )
+
+            # ── Enregistrer la version courante ──
+            c_nom, c_btn = st.columns([3, 1])
+            with c_nom:
+                nom_version = st.text_input(
+                    "Nom de la version",
+                    placeholder="ex : Version sans trous le mardi",
+                    label_visibility="collapsed",
+                    key="saisie_nom_version",
+                )
+            with c_btn:
+                enregistrer = st.button("💾 Enregistrer", use_container_width=True)
+
+            if enregistrer:
+                nom = (nom_version or "").strip()
+                if not nom:
+                    nom = "Version du " + datetime.now().strftime("%d/%m à %Hh%M")
+                horod = datetime.now().strftime("%d/%m/%Y %H:%M")
+                nouvelle = persist.creer_version(emplois, nom, horod)
+                ecrire_versions(persist.ajouter_version(versions, nouvelle))
+                st.session_state.pop("saisie_nom_version", None)
+                st.success(f"Version « {nom} » enregistrée.")
+                time.sleep(0.8)
+                st.rerun()
+
+            # ── Liste des versions ──
+            if not versions:
+                st.info("Aucune version enregistrée pour l'instant.")
+            else:
+                st.markdown("**Vos versions** (de la plus récente à la plus ancienne) :")
+                for v in versions:
+                    c_info, c_rest, c_suppr = st.columns([3, 1, 1])
+                    with c_info:
+                        st.markdown(
+                            f"**{v['nom']}**  \n"
+                            f"<span style='color:#888;font-size:0.85em'>"
+                            f"{v['horodatage']} · {v['nb_cours']} cours</span>",
+                            unsafe_allow_html=True,
+                        )
+                    with c_rest:
+                        if st.button("📂 Restaurer", key=f"rest_{v['id']}",
+                                     use_container_width=True):
+                            # Filet de sécurité : on enregistre d'abord le travail
+                            # EN COURS comme version auto, pour ne rien perdre.
+                            deja = any(
+                                persist.version_vers_emplois(x) == emplois
+                                for x in versions
+                            )
+                            if not deja:
+                                auto = persist.creer_version(
+                                    emplois,
+                                    "Travail en cours (avant restauration)",
+                                    datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                )
+                                liste_maj = persist.ajouter_version(versions, auto)
+                            else:
+                                liste_maj = versions
+                            # Restaurer la version choisie
+                            st.session_state.historique.append(dict(emplois))
+                            st.session_state.emplois = persist.version_vers_emplois(v)
+                            st.session_state.chaine = []
+                            ecrire_versions(liste_maj)
+                            st.success(f"Version « {v['nom']} » restaurée.")
+                            time.sleep(0.8)
+                            st.rerun()
+                    with c_suppr:
+                        if st.button("🗑", key=f"suppr_{v['id']}",
+                                     use_container_width=True,
+                                     help="Supprimer cette version"):
+                            ecrire_versions(persist.retirer_version(versions, v['id']))
+                            st.rerun()
 
         vue = st.radio("Vue", ["Par classe", "Par professeur"],
                        horizontal=True, label_visibility="collapsed")
@@ -942,8 +1163,12 @@ en trouve une bonne dans le temps imparti. Si vous n'êtes pas satisfait,
 vous pouvez relancer la génération ou ajuster manuellement à l'écran 3.
 
 **« Mes données sont-elles confidentielles ? »**
-Le fichier Excel que vous importez est traité localement par l'application.
-Il n'est pas envoyé à un serveur tiers ni stocké entre les sessions.
+Le fichier Excel que vous importez est traité par l'application le temps de la
+session. Votre travail (emploi du temps, ajustements) est sauvegardé
+automatiquement dans **votre propre navigateur** pour que vous le retrouviez si
+la connexion se coupe ou si vous fermez l'onglet. Ces données restent sur votre
+appareil ; vous pouvez les effacer à tout moment avec le bouton « Effacer la
+sauvegarde » de l'écran 1.
 """)
 
     # ── Contact / signalement ──
@@ -953,3 +1178,8 @@ Il n'est pas envoyé à un serveur tiers ni stocké entre les sessions.
         "le bug directement sur "
         "[GitHub](https://github.com/hienmarius394-dev/generateur-edt)."
     )
+
+
+# ════════════════════════ SAUVEGARDE AUTO (fin de script) ════════════════════════
+# Appelé en TOUT dernier : l'état complet des 4 écrans est à jour ici.
+sauvegarder_si_change()
