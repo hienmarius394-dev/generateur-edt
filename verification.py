@@ -324,6 +324,55 @@ def appliquer_deplacement(emplois, classe, src, dst):
     return nouveau
 
 
+# ════════════════ PERMUTATION EN CHAÎNE (déplacements groupés) ════════════════
+def verifier_chaine(emplois, classe, etapes, permanents, indispos):
+    """Vérifie une CHAÎNE de déplacements à appliquer dans l'ordre, sur une
+    copie de travail (l'emploi du temps réel n'est jamais modifié ici).
+
+    etapes : liste de (src, dst), chacun un (jour, slot).
+    Chaque étape déplace le cours qui se trouve EN CE MOMENT sur `src`
+    (donc après les étapes précédentes) vers `dst`. Si `dst` est occupé,
+    c'est un échange — exactement la même sémantique qu'un déplacement seul.
+
+    Retourne (conflits, avertissements, etapes_resolues) :
+      - conflits : liste de messages ; si non vide, RIEN ne doit être appliqué.
+        Chaque message précise le numéro de l'étape en cause.
+      - avertissements : messages non bloquants (ex: bloc consécutif cassé).
+      - etapes_resolues : liste de (src, dst, est_echange), dans le même
+        ordre, prête à être rejouée par appliquer_chaine si conflits est vide.
+    """
+    travail = dict(emplois)
+    conflits, avertissements, resolues = [], [], []
+
+    for i, (src, dst) in enumerate(etapes, start=1):
+        c, a, ech = verifier_deplacement(
+            travail, classe, src, dst, permanents, indispos,
+        )
+        if c:
+            conflits.extend(f"Étape {i} ({JOURS[src[0]]} {SLOT_LABELS[src[1]]} "
+                             f"→ {JOURS[dst[0]]} {SLOT_LABELS[dst[1]]}) : {m}"
+                             for m in c)
+            # On arrête dès la première étape en échec : les étapes suivantes
+            # dépendent de l'état produit par celle-ci et n'ont pas de sens
+            # tant qu'elle n'est pas résolue.
+            break
+        avertissements.extend(a)
+        resolues.append((src, dst, ech))
+        travail = appliquer_deplacement(travail, classe, src, dst)
+
+    return conflits, avertissements, resolues
+
+
+def appliquer_chaine(emplois, classe, etapes_resolues):
+    """Rejoue dans l'ordre les étapes déjà validées par verifier_chaine
+    (etapes_resolues = sortie de verifier_chaine, conflits vide requis).
+    Retourne le nouveau dict d'emplois."""
+    courant = dict(emplois)
+    for src, dst, _ech in etapes_resolues:
+        courant = appliquer_deplacement(courant, classe, src, dst)
+    return courant
+
+
 # ════════════════ BILAN QUALITÉ DE L'ÉTAT COURANT ════════════════
 def bilan_etat(emplois, classes, permanents, services, indispos):
     """Re-vérifie l'état courant (après modifications manuelles).

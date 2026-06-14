@@ -75,6 +75,7 @@ defauts = {
     "duree_generation": None,
     "historique": [],       # pile pour Annuler
     "nb_modifs": 0,
+    "chaine": [],           # liste de (src, dst) en attente de validation groupée
 }
 for k, v in defauts.items():
     st.session_state.setdefault(k, v)
@@ -563,47 +564,74 @@ with tab3:
         else:
             classe = st.selectbox("Classe", classes)
 
-            # Cours de la classe, triés chronologiquement
-            cours_classe = sorted(
-                [(d, t, info) for (cl, d, t), info in emplois.items()
-                 if cl == classe],
-                key=lambda x: (x[0], x[1]),
-            )
-
             def lib_cours(c):
                 d, t, info = c
                 return (f"{JOURS[d]} {SLOT_LABELS[t]} — {info['matiere']} "
                         f"({info['prof'].replace('M. ', '')})")
 
-            def lib_dest(dt):
-                d, t = dt
-                occ = emplois.get((classe, d, t))
-                etat = f"occupé : {occ['matiere']}" if occ else "libre"
-                return f"{JOURS[d]} {SLOT_LABELS[t]} — {etat}"
-
             with st.container(border=True):
-                st.markdown("**Déplacer un cours** — choisissez le cours puis "
-                            "le créneau d'arrivée ; les conflits sont vérifiés "
-                            "automatiquement. Si le créneau d'arrivée est occupé, "
-                            "les deux cours sont **échangés**.")
+                st.markdown("**Déplacer plusieurs cours d'un coup** — "
+                            "ajoutez chaque déplacement à la liste ci-dessous "
+                            "(le créneau d'arrivée peut être occupé : les cours "
+                            "seront alors échangés). Quand la liste est prête, "
+                            "appliquez tout en une seule fois — rien n'est "
+                            "modifié si un seul maillon pose problème.")
+
+                # ── Aperçu : grille « après chaîne actuelle » pour choisir
+                # le prochain mouvement en connaissance de cause.
+                etapes_en_cours = st.session_state.chaine
+                emplois_apercu = emplois
+                if etapes_en_cours:
+                    _c, _a, _resolues = verif.verifier_chaine(
+                        emplois, classe, etapes_en_cours, permanents, indispos,
+                    )
+                    if not _c:
+                        emplois_apercu = verif.appliquer_chaine(
+                            emplois, classe, _resolues,
+                        )
+
+                cours_apercu = sorted(
+                    [(d, t, info) for (cl, d, t), info in emplois_apercu.items()
+                     if cl == classe],
+                    key=lambda x: (x[0], x[1]),
+                )
+
                 sel_src = st.selectbox(
-                    "Cours à déplacer", cours_classe, format_func=lib_cours,
+                    "Cours à déplacer", cours_apercu, format_func=lib_cours,
                     index=None, placeholder="Choisir un cours…",
                     key=f"src_{classe}",
                 )
                 destinations = [(d, t) for d in range(N_JOURS)
                                 for t in range(N_SLOTS)]
+
+                def lib_dest_apercu(dt):
+                    d, t = dt
+                    occ = emplois_apercu.get((classe, d, t))
+                    etat = f"occupé : {occ['matiere']}" if occ else "libre"
+                    return f"{JOURS[d]} {SLOT_LABELS[t]} — {etat}"
+
                 sel_dst = st.selectbox(
-                    "Nouveau créneau", destinations, format_func=lib_dest,
+                    "Nouveau créneau", destinations, format_func=lib_dest_apercu,
                     index=None, placeholder="Choisir le créneau d'arrivée…",
                     key=f"dst_{classe}",
                 )
 
-                c_dep, c_undo = st.columns(2)
-                with c_dep:
-                    deplacer = st.button(
-                        "↔️ Vérifier et déplacer", type="primary",
-                        disabled=(sel_src is None or sel_dst is None),
+                c_add, c_app, c_vid, c_undo = st.columns(4)
+                with c_add:
+                    src_eq_dst = sel_src is not None and (sel_src[0], sel_src[1]) == sel_dst \
+                        if (sel_src and sel_dst) else False
+                    ajouter = st.button(
+                        "➕ Ajouter à la chaîne",
+                        disabled=(sel_src is None or sel_dst is None or src_eq_dst),
+                    )
+                with c_app:
+                    appliquer = st.button(
+                        f"✅ Appliquer la chaîne ({len(etapes_en_cours)})",
+                        type="primary", disabled=not etapes_en_cours,
+                    )
+                with c_vid:
+                    vider = st.button(
+                        "🗑 Vider la chaîne", disabled=not etapes_en_cours,
                     )
                 with c_undo:
                     annuler = st.button(
@@ -612,27 +640,70 @@ with tab3:
                         disabled=not st.session_state.historique,
                     )
 
-                if deplacer and sel_src and sel_dst:
+                if ajouter and sel_src and sel_dst:
                     src = (sel_src[0], sel_src[1])
-                    conflits, averts, echange = verif.verifier_deplacement(
-                        emplois, classe, src, sel_dst, permanents, indispos,
+                    st.session_state.chaine.append((src, sel_dst))
+                    for k in (f"src_{classe}", f"dst_{classe}"):
+                        st.session_state.pop(k, None)
+                    st.rerun()
+
+                if vider:
+                    st.session_state.chaine = []
+                    st.rerun()
+
+                # ── Liste des étapes en attente, avec retrait individuel ──
+                if etapes_en_cours:
+                    st.markdown("**Chaîne en attente :**")
+                    for i, (src, dst) in enumerate(etapes_en_cours):
+                        col_txt, col_del = st.columns([5, 1])
+                        with col_txt:
+                            st.markdown(
+                                f"{i + 1}. {JOURS[src[0]]} {SLOT_LABELS[src[1]]} "
+                                f"→ {JOURS[dst[0]]} {SLOT_LABELS[dst[1]]}"
+                            )
+                        with col_del:
+                            if st.button("✖", key=f"del_etape_{classe}_{i}"):
+                                st.session_state.chaine.pop(i)
+                                st.rerun()
+
+                    # Vérification en direct de la chaîne actuelle
+                    conflits_apercu, _a, _r = verif.verifier_chaine(
+                        emplois, classe, etapes_en_cours, permanents, indispos,
+                    )
+                    if conflits_apercu:
+                        st.error("**Cette chaîne ne peut pas être appliquée "
+                                 "telle quelle :**")
+                        for c in conflits_apercu:
+                            st.markdown(f"- ❌ {c}")
+                        st.caption("Retirez ou réordonnez l'étape en cause "
+                                   "ci-dessus avant d'appliquer.")
+                    else:
+                        st.caption("✅ Chaîne valide — prête à être appliquée.")
+
+                if appliquer and etapes_en_cours:
+                    conflits, averts, resolues = verif.verifier_chaine(
+                        emplois, classe, etapes_en_cours, permanents, indispos,
                     )
                     if conflits:
-                        st.error("**Déplacement impossible :**")
+                        st.error("**Application impossible :**")
                         for c in conflits:
                             st.markdown(f"- ❌ {c}")
                     else:
                         st.session_state.historique.append(dict(emplois))
                         if len(st.session_state.historique) > 25:
                             st.session_state.historique.pop(0)
-                        st.session_state.emplois = verif.appliquer_deplacement(
-                            emplois, classe, src, sel_dst,
+                        st.session_state.emplois = verif.appliquer_chaine(
+                            emplois, classe, resolues,
                         )
                         st.session_state.nb_modifs += 1
+                        st.session_state.chaine = []
                         for a in averts:
                             st.warning(a)
-                        st.success("Échange effectué." if echange
-                                   else "Cours déplacé.")
+                        n_ech = sum(1 for _, _, e in resolues if e)
+                        msg = f"{len(resolues)} déplacement(s) appliqué(s)"
+                        if n_ech:
+                            msg += f" (dont {n_ech} échange(s))"
+                        st.success(msg + ".")
                         for k in (f"src_{classe}", f"dst_{classe}"):
                             st.session_state.pop(k, None)
                         time.sleep(0.9)
@@ -642,18 +713,25 @@ with tab3:
                     st.session_state.emplois = st.session_state.historique.pop()
                     st.session_state.nb_modifs = max(
                         0, st.session_state.nb_modifs - 1)
+                    st.session_state.chaine = []
                     for k in (f"src_{classe}", f"dst_{classe}"):
                         st.session_state.pop(k, None)
                     st.rerun()
 
-            # Grille avec surlignage de la sélection
+            # Grille avec surlignage de la sélection ; affiche l'état RÉEL +
+            # la chaîne en attente, pour visualiser le résultat avant validation.
             src_hl = (sel_src[0], sel_src[1]) if sel_src else None
             st.markdown(
-                grille_html(contenu_classe(emplois, classe),
+                grille_html(contenu_classe(emplois_apercu, classe),
                             src=src_hl, dst=sel_dst),
                 unsafe_allow_html=True,
             )
-            st.caption("🟦 cours sélectionné · 🟧 créneau d'arrivée")
+            if st.session_state.chaine:
+                st.caption("🟦 cours sélectionné · 🟧 créneau d'arrivée · "
+                           "grille = état réel + chaîne en attente "
+                           "(non encore appliquée)")
+            else:
+                st.caption("🟦 cours sélectionné · 🟧 créneau d'arrivée")
 
         # ── État des vérifications après modifications ──
         if st.session_state.nb_modifs:
