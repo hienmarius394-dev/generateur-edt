@@ -9,6 +9,7 @@ Tout en français, léger (connexion lente), utilisable au téléphone.
 import io
 import os
 import time
+import hashlib
 import tempfile
 import threading
 from datetime import datetime
@@ -51,6 +52,27 @@ st.markdown("""
 div.stButton > button, div.stDownloadButton > button {
     width: 100%; padding: 0.6rem 0.8rem; font-weight: 600;
 }
+/* ── Uploader en français ──
+   Streamlit affiche « Drag and drop file here » / « Browse files » en dur.
+   On masque ces textes et on les remplace en CSS. Si Streamlit change son
+   DOM un jour, l'anglais réapparaît simplement (aucune casse possible). */
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small {display: none;}
+[data-testid="stFileUploaderDropzoneInstructions"] > div::before {
+    content: "Glissez votre fichier Excel ici"; font-weight: 600;
+    display: block;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+    content: "Fichier .xlsx uniquement"; font-size: 0.8rem; opacity: 0.7;
+    display: block; margin-top: 2px;
+}
+[data-testid="stFileUploader"] section button {font-size: 0 !important;}
+[data-testid="stFileUploader"] section button::after {
+    content: "Parcourir…"; font-size: 0.9rem; font-weight: 600;
+}
+/* Séparateur « ou » de l'écran d'accueil */
+.edt-ou {text-align: center; color: #999; font-size: 0.85rem;
+         margin: 1.3rem 0 0.9rem; letter-spacing: 0.02em;}
 .edt-wrap {overflow-x: auto; border: 1px solid #ccc; border-radius: 6px;}
 table.edt {border-collapse: collapse; width: 100%; min-width: 620px;
            font-family: Arial, sans-serif;}
@@ -378,7 +400,8 @@ if meta.get("etablissement"):
     st.caption(f"**{meta['etablissement']}**"
                + (f" — Année scolaire {meta['annee']}" if meta.get("annee") else ""))
 else:
-    st.caption("Importez le fichier Excel rempli, générez, ajustez, imprimez.")
+    st.caption("Tous les emplois du temps de votre établissement, "
+               "générés sans conflit et prêts à imprimer.")
 
 FICHIER_TEMPLATE = os.path.join(DOSSIER, "template_vierge.xlsx")
 
@@ -410,15 +433,38 @@ with tab1:
                 for k in list(defauts.keys()):
                     st.session_state[k] = defauts[k]
                 st.session_state._sauvegarde_restauree = False
+                st.session_state.pop("_fichier_traite", None)
                 st.rerun()
     elif _STORAGE_DISPO and (st.session_state.get("donnees")
                              or st.session_state.get("emplois")):
         st.caption("💾 Sauvegarde automatique active — votre travail est "
                    "conservé dans ce navigateur même en cas de coupure.")
 
-    st.write(
-        "Déposez le **template Excel rempli** (onglets Classes, Professeurs, "
-        "Services, Disponibilités, Contraintes)."
+    # ── Accueil : le chemin le plus simple d'abord ──
+    st.markdown(
+        "Créez l'emploi du temps **complet** de votre établissement en quelques "
+        "minutes : zéro conflit, volumes horaires exacts, et professeurs "
+        "vacataires regroupés sur un minimum de jours."
+    )
+    if os.path.exists(FICHIER_EXEMPLE):
+        bouton_exemple = st.button(
+            "🚀 Essayer maintenant avec une école d'exemple",
+            type="primary", key="btn_demo",
+        )
+        st.caption(
+            "Lycée réaliste : 10 classes, 20 professeurs, 262 h de cours — "
+            "rien à préparer, le résultat arrive en moins d'une minute."
+        )
+    else:
+        bouton_exemple = False
+
+    st.markdown('<div class="edt-ou">— ou avec les données de votre '
+                'établissement —</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        "**①** Téléchargez le modèle Excel&ensp;→&ensp;**②** Remplissez-le avec "
+        "vos classes, professeurs et matières&ensp;→&ensp;**③** Déposez-le "
+        "ci-dessous : il est vérifié automatiquement."
     )
 
     # ── Boutons téléchargement template vierge + exemple rempli ──
@@ -428,24 +474,24 @@ with tab1:
             with open(FICHIER_TEMPLATE, "rb") as _f:
                 _data_template = _f.read()
             st.download_button(
-                label="📥 Télécharger le template vierge",
+                label="📥 Modèle vierge à remplir",
                 data=_data_template,
                 file_name="template_emplois_du_temps.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 help="Téléchargez ce fichier, remplissez-le avec les données de votre "
-                     "école, puis importez-le ici.",
+                     "école, puis déposez-le ci-dessous.",
             )
     with dl_col2:
         if os.path.exists(FICHIER_EXEMPLE):
             with open(FICHIER_EXEMPLE, "rb") as _f:
                 _data_exemple = _f.read()
             st.download_button(
-                label="📄 Télécharger un exemple de template",
+                label="📄 Exemple rempli (pour voir comment faire)",
                 data=_data_exemple,
                 file_name="exemple_template_rempli.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Un exemple complet et rempli pour voir comment structurer "
-                     "votre fichier. Utilisez-le comme référence.",
+                help="Un exemple complet et rempli, à garder ouvert comme référence "
+                     "pendant que vous remplissez le vôtre.",
             )
 
     fichier = st.file_uploader(
@@ -454,27 +500,26 @@ with tab1:
         label_visibility="collapsed",
     )
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        bouton_valider = st.button("✅ Valider ce fichier",
-                                   disabled=fichier is None, type="primary")
-    with col_b:
-        bouton_exemple = st.button(
-            "🎓 Essayer avec l'exemple du template déjà rempli",
-            disabled=not os.path.exists(FICHIER_EXEMPLE),
-        )
-
-    if bouton_valider and fichier is not None:
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-            tmp.write(fichier.getvalue())
-            chemin_tmp = tmp.name
-        with st.spinner("Lecture et vérification des données…"):
-            charger_fichier(chemin_tmp, fichier.name)
-        os.unlink(chemin_tmp)
+    # ── Validation AUTOMATIQUE dès le dépôt (plus aucun clic à faire) ──
+    # L'empreinte du contenu évite de re-valider à chaque interaction tant
+    # que le fichier déposé n'a pas changé.
+    if fichier is not None:
+        empreinte_fichier = hashlib.md5(fichier.getvalue()).hexdigest()
+        if st.session_state.get("_fichier_traite") != empreinte_fichier:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                tmp.write(fichier.getvalue())
+                chemin_tmp = tmp.name
+            with st.spinner("Lecture et vérification des données…"):
+                charger_fichier(chemin_tmp, fichier.name)
+            os.unlink(chemin_tmp)
+            st.session_state._fichier_traite = empreinte_fichier
 
     if bouton_exemple:
         with st.spinner("Chargement de l'exemple…"):
             charger_fichier(FICHIER_EXEMPLE, "Exemple — Lycée Moderne de Cocody")
+        # La démo devient la source active : si l'utilisateur redépose ensuite
+        # son propre fichier (même inchangé), il sera bien re-validé.
+        st.session_state._fichier_traite = "exemple"
 
     # ── Résultat de la validation ──
     if st.session_state.erreurs:
