@@ -478,7 +478,7 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
         d = svc["jour_impose"]
         if d is None:
             continue
-        if svc["seance_max"] >= 2 and svc["heures"] >= svc["seance_min"]:
+        if svc["seance_max"] >= 2 and svc["heures"] >= 2:
             # au moins une séance longue (k>=2) commence ce jour-là si possible,
             # sinon au moins une heure ce jour-là (cas où seules des 1h tiennent)
             longues_ce_jour = [v for (dd, t, k, v) in seance_long_start[s]
@@ -517,7 +517,7 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
     # C'est ce qui élimine le cas « cours à 10h puis cours à 16h » : le grand
     # vide du midi devient un trou coûteux que le moteur cherche à supprimer
     # en regroupant les cours. Pénalité forte (POIDS_TROU).
-    POIDS_TROU = 6
+    POIDS_TROU = 25
 
     def penaliser_trous(groupes, prefixe):
         for g_idx, s_list in enumerate(groupes):
@@ -559,9 +559,16 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
     # Poids volontairement INFÉRIEUR à POIDS_TROU : on n'accepte jamais de créer
     # un trou dans la grille d'une CLASSE pour économiser un jour à un prof. Le
     # confort élève prime sur le confort enseignant.
-    POIDS_JOUR_PROF = 3
+    # Poids DIFFÉRENCIÉ : fort pour les vacataires (ils viennent d'un autre
+    # établissement, chaque jour économisé est un vrai gain), symbolique pour
+    # les permanents (présents de toute façon). Concentrer le poids sur les
+    # vacataires permet au solveur d'atteindre ≤2 jours de présence en
+    # quelques secondes au lieu de plafonner à 3-4 jours.
+    POIDS_JOUR_VACATAIRE = 15
+    POIDS_JOUR_PERMANENT = 1
     present = {}
     for prof, s_list in pr_svcs.items():
+        w = POIDS_JOUR_PERMANENT if prof in permanents else POIDS_JOUR_VACATAIRE
         for d in range(N_JOURS):
             p = model.new_bool_var(f"prof_present_{prof}_{d}")
             present[prof, d] = p
@@ -569,7 +576,7 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
             heures_jour = [x[s, d, t] for s in s_list for t in range(N_SLOTS)]
             model.add(sum(heures_jour) >= 1).only_enforce_if(p)
             model.add(sum(heures_jour) == 0).only_enforce_if(p.Not())
-            malus.append(POIDS_JOUR_PROF * p)
+            malus.append(w * p)
 
     # ── Option « matin de préférence » : chaque heure placée l'après-midi
     # reçoit un petit malus, donc à compacité égale le moteur préfère
