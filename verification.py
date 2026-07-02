@@ -325,6 +325,32 @@ def appliquer_deplacement(emplois, classe, src, dst):
 
 
 # ════════════════ PERMUTATION EN CHAÎNE (déplacements groupés) ════════════════
+def creneaux_libres_prof(emplois, prof, permanents, indispos, classe=None):
+    """Liste les créneaux où `prof` peut réellement donner cours :
+    disponible (onglet Disponibilités), pas en réunion (permanent le mercredi
+    après-midi) et pas déjà en cours dans une classe à ce moment-là.
+
+    Retourne une liste de (jour, slot, classe_libre) triée, où classe_libre
+    indique si `classe` (si fournie) est elle aussi libre sur ce créneau :
+      True  → déplacement direct possible,
+      False → le créneau de la classe est occupé (ce serait un échange).
+    """
+    occupe = {(d, t) for (cl, d, t), info in emplois.items()
+              if info["prof"] == prof}
+    indispo_prof = indispos.get(prof, set())
+    libres = []
+    for d in range(N_JOURS):
+        for t in range(N_SLOTS):
+            if (d, t) in indispo_prof or (d, t) in occupe:
+                continue
+            if prof in permanents and d == 2 and t in SLOTS_APMIDI:
+                continue
+            cl_libre = (classe is None
+                        or (classe, d, t) not in emplois)
+            libres.append((d, t, cl_libre))
+    return libres
+
+
 def verifier_chaine(emplois, classe, etapes, permanents, indispos):
     """Vérifie une CHAÎNE de déplacements à appliquer dans l'ordre, sur une
     copie de travail (l'emploi du temps réel n'est jamais modifié ici).

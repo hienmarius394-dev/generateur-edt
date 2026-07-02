@@ -474,6 +474,65 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
         model.add(est_1h == 0).only_enforce_if(au_moins_2)
         merc_penalites.append(POIDS_MERC_1H * est_1h)
 
+    # ── H6c (préférence forte) : éviter qu'une classe ait exactement 1h sur ──
+    # ── une DEMI-JOURNÉE (matin ou après-midi).                             ──
+    # Cas typique constaté sur le terrain : la classe finit sa matinée, puis
+    # revient (ou reste) l'après-midi pour UNE seule matière — fatigant pour
+    # les élèves, sans intérêt pédagogique. Dès qu'une demi-journée est
+    # occupée, elle doit compter au moins 2 heures ; sinon le solveur regroupe
+    # ces heures isolées sur moins de demi-journées (idéalement le matin).
+    # Même choix de conception que H6b : PÉNALITÉ FORTE, jamais de contrainte
+    # dure (une matière d'1h à jour imposé chez un prof très indisponible
+    # rendrait la grille infaisable). Poids SUPÉRIEUR à POIDS_TROU (25) et aux
+    # poids de regroupement profs (15/1) : le confort élève prime toujours.
+    POIDS_DEMI_1H = 30
+    for cl, s_list in cl_svcs.items():
+        for d in range(N_JOURS):
+            for nom, slots in (("mat", SLOTS_MATIN), ("apm", SLOTS_APMIDI)):
+                h_demi = sum(x[s, d, t] for s in s_list for t in slots)
+                ge1 = model.new_bool_var(f"demi_ge1_{cl}_{d}_{nom}")
+                ge2 = model.new_bool_var(f"demi_ge2_{cl}_{d}_{nom}")
+                model.add(h_demi >= 1).only_enforce_if(ge1)
+                model.add(h_demi == 0).only_enforce_if(ge1.Not())
+                model.add(h_demi >= 2).only_enforce_if(ge2)
+                model.add(h_demi <= 1).only_enforce_if(ge2.Not())
+                seule = model.new_bool_var(f"demi_1h_{cl}_{d}_{nom}")
+                model.add(seule == 1).only_enforce_if([ge1, ge2.Not()])
+                model.add(seule == 0).only_enforce_if(ge1.Not())
+                model.add(seule == 0).only_enforce_if(ge2)
+                merc_penalites.append(POIDS_DEMI_1H * seule)
+
+    # ── H6c (préférence forte) : éviter les DEMI-JOURNÉES à 1 seul cours ──
+    # Une classe qui ne vient l'après-midi (ou le matin) que pour une seule
+    # heure se déplace pour presque rien : fatigant pour les élèves, sans
+    # intérêt pédagogique. On pénalise chaque demi-journée où la classe a
+    # EXACTEMENT 1h : soit le moteur regroupe (>= 2h), soit il libère la
+    # demi-journée (0h), typiquement en ramenant l'heure isolée le matin.
+    # Même choix de conception que le mercredi : PÉNALITÉ, jamais contrainte
+    # dure (une contrainte « 0 ou >=2 » peut rendre le problème infaisable
+    # quand les disponibilités sont tendues).
+    # Poids : SOUS POIDS_TROU (on ne crée jamais un trou dans la journée d'une
+    # classe pour éviter une demi-journée courte) mais AU-DESSUS du poids
+    # vacataire (on accepte qu'un prof vienne un jour de plus si ça évite aux
+    # élèves un déplacement pour une seule heure).
+    POIDS_DEMI_1H = 20
+    demi_penalites = []
+    for cl, s_list in cl_svcs.items():
+        for d in range(N_JOURS):
+            for nom, slots in (("am", SLOTS_MATIN), ("pm", SLOTS_APMIDI)):
+                h_demi = sum(x[s, d, t] for s in s_list for t in slots)
+                ge1 = model.new_bool_var(f"demi_ge1_{cl}_{d}_{nom}")
+                ge2 = model.new_bool_var(f"demi_ge2_{cl}_{d}_{nom}")
+                model.add(h_demi >= 1).only_enforce_if(ge1)
+                model.add(h_demi == 0).only_enforce_if(ge1.Not())
+                model.add(h_demi >= 2).only_enforce_if(ge2)
+                model.add(h_demi <= 1).only_enforce_if(ge2.Not())
+                est_1h = model.new_bool_var(f"demi_1h_{cl}_{d}_{nom}")
+                model.add(est_1h == 1).only_enforce_if([ge1, ge2.Not()])
+                model.add(est_1h == 0).only_enforce_if(ge1.Not())
+                model.add(est_1h == 0).only_enforce_if(ge2)
+                demi_penalites.append(POIDS_DEMI_1H * est_1h)
+
     # Un service dont la séance n'est pas contrainte (seance_min == 1 et
     # seance_max == total) ne doit pas s'entasser : on garde l'ancienne règle
     # « ≤ 2h par jour » pour étaler la matière sur la semaine. Les services
@@ -600,7 +659,8 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
                 for t in SLOTS_APMIDI:
                     malus.append(x[s, d, t])
 
-    model.maximize(sum(bonus) - sum(malus) - sum(merc_penalites))
+    model.maximize(sum(bonus) - sum(malus) - sum(merc_penalites)
+                   - sum(demi_penalites))
 
     # ── Résolution ──
     solver = cp_model.CpSolver()

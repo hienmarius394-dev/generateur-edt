@@ -362,6 +362,23 @@ def contenu_prof(emplois, prof):
     return f
 
 
+# ── Résumé compact des créneaux libres d'un prof (onglet Ajuster) ──
+# Les créneaux eux-mêmes viennent de verif.creneaux_libres_prof : source
+# UNIQUE de vérité (dispo + réunion mercredi + déjà en cours ailleurs).
+def resume_libres(libres):
+    """Texte compact « Lundi : 10h15, 11h15 ⇄ · Mardi : 07h00 … ».
+    `libres` = sortie de verif.creneaux_libres_prof : (jour, slot, classe_libre).
+    ⇄ signale que la classe a déjà cours (le déplacement serait un échange)."""
+    par_jour = {}
+    for d, t, cl_ok in libres:
+        h = SLOT_LABELS[t].split(" – ")[0] + ("" if cl_ok else " ⇄")
+        par_jour.setdefault(d, []).append(h)
+    if not par_jour:
+        return "aucun créneau libre cette semaine"
+    return " · ".join(f"**{JOURS[d]}** : {', '.join(hs)}"
+                      for d, hs in sorted(par_jour.items()))
+
+
 # ════════════════════════ EXPORTS (avec cache) ════════════════════════
 def _cle_emplois(emplois):
     return tuple(sorted((cl, d, t, i["prof"], i["matiere"])
@@ -874,6 +891,16 @@ with tab3:
                     d, t = dt
                     occ = emplois_apercu.get((classe, d, t))
                     etat = f"occupé : {occ['matiere']}" if occ else "libre"
+                    # Dès qu'un cours source est choisi, on annonce en direct
+                    # si le déplacement (ou l'échange) vers ce créneau passe :
+                    # plus besoin de tâtonner pour trouver où le prof est libre.
+                    if sel_src is not None and (sel_src[0], sel_src[1]) != dt:
+                        c_test, _, _ech = verif.verifier_deplacement(
+                            emplois_apercu, classe,
+                            (sel_src[0], sel_src[1]), dt,
+                            permanents, indispos,
+                        )
+                        etat += " · ✅ possible" if not c_test else " · ⛔ conflit"
                     return f"{JOURS[d]} {SLOT_LABELS[t]} — {etat}"
 
                 sel_dst = st.selectbox(
@@ -881,6 +908,20 @@ with tab3:
                     index=None, placeholder="Choisir le créneau d'arrivée…",
                     key=f"dst_{classe}",
                 )
+
+                # Disponibilité réelle du prof du cours sélectionné, en direct.
+                if sel_src is not None:
+                    prof_src = sel_src[2]["prof"]
+                    libres_src = verif.creneaux_libres_prof(
+                        emplois_apercu, prof_src, permanents, indispos,
+                        classe=classe,
+                    )
+                    st.markdown(
+                        f"📍 **{prof_src}** est libre : "
+                        f"{resume_libres(libres_src)}",
+                    )
+                    st.caption("⇄ = la classe a déjà cours sur ce créneau "
+                               "(le déplacement se ferait en échange).")
 
                 c_add, c_app, c_vid, c_undo = st.columns(4)
                 with c_add:
@@ -933,7 +974,7 @@ with tab3:
                                 st.rerun()
 
                     # Vérification en direct de la chaîne actuelle
-                    conflits_apercu, _a, _r = verif.verifier_chaine(
+                    conflits_apercu, _a, _resolues_ok = verif.verifier_chaine(
                         emplois, classe, etapes_en_cours, permanents, indispos,
                     )
                     if conflits_apercu:
@@ -943,6 +984,55 @@ with tab3:
                             st.markdown(f"- ❌ {c}")
                         st.caption("Retirez ou réordonnez l'étape en cause "
                                    "ci-dessus avant d'appliquer.")
+
+                        # ── Aide au choix : où le prof en cause est-il
+                        # réellement libre ? (disponible, pas en réunion,
+                        # pas déjà en cours dans une autre classe.)
+                        # État de travail = étapes déjà validées appliquées.
+                        etat = verif.appliquer_chaine(
+                            emplois, classe, _resolues_ok,
+                        ) if _resolues_ok else emplois
+                        i_echec = len(_resolues_ok)
+                        src_e, dst_e = etapes_en_cours[i_echec]
+                        impliques = []
+                        for pos in (src_e, dst_e):
+                            info = etat.get((classe, pos[0], pos[1]))
+                            if info and info["prof"] not in impliques:
+                                impliques.append(info["prof"])
+                        texte_conflits = " ".join(conflits_apercu)
+                        for prof_c in impliques:
+                            if prof_c not in texte_conflits:
+                                continue
+                            libres = verif.creneaux_libres_prof(
+                                etat, prof_c, permanents, indispos,
+                                classe=classe,
+                            )
+                            with st.expander(
+                                f"📅 Créneaux où {prof_c} est libre "
+                                f"({len(libres)})", expanded=True,
+                            ):
+                                if not libres:
+                                    st.markdown(
+                                        "Aucun créneau libre cette semaine "
+                                        "pour ce professeur.")
+                                else:
+                                    par_jour = {}
+                                    for d, t, cl_ok in libres:
+                                        par_jour.setdefault(d, []).append(
+                                            (t, cl_ok))
+                                    for d in sorted(par_jour):
+                                        items = ", ".join(
+                                            SLOT_LABELS[t]
+                                            + ("" if cl_ok else " ⇄")
+                                            for t, cl_ok in par_jour[d]
+                                        )
+                                        st.markdown(
+                                            f"**{JOURS[d]}** : {items}")
+                                    st.caption(
+                                        "⇄ = la classe a déjà cours sur ce "
+                                        "créneau : le déplacement se fera "
+                                        "en échange.")
+
                     else:
                         st.caption("✅ Chaîne valide — prête à être appliquée.")
 
