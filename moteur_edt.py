@@ -135,8 +135,10 @@ def lire_excel(chemin):
             # min 1. Sans bloc → durée libre (1..H).
             b = svc["bloc_size"]
             dmin, dmax = (1, b) if b >= 2 else (1, svc["heures"])
-        # Bornage de sécurité : une séance ne peut excéder le total d'heures.
-        dmax = min(dmax, svc["heures"])
+        # Bornage de sécurité : une séance ne peut excéder le total d'heures,
+        # ni 5h (le plus grand bloc continu de la journée : la matinée), car
+        # une séance ne chevauche jamais la pause déjeuner.
+        dmax = min(dmax, svc["heures"], len(SLOTS_MATIN))
         dmin = min(dmin, dmax)
         svc["seance_min"] = max(1, dmin)
         svc["seance_max"] = max(svc["seance_min"], dmax)
@@ -337,7 +339,13 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
     # Chaque service est découpé en séances dont la durée est comprise entre
     # seance_min et seance_max (réglable par matière dans l'onglet Paramètres).
     # On crée une variable de DÉBUT par taille autorisée et par position.
-    # NOTE : une séance PEUT traverser la pause déjeuner (choix assumé).
+    # RÈGLE PHYSIQUE : une séance est CONTINUE dans le temps réel. Elle ne peut
+    # donc jamais chevaucher la pause déjeuner (finir à 12h et « reprendre » à
+    # 14h n'est pas une séance). Toute séance tient entièrement le matin
+    # (créneaux 0-4) ou entièrement l'après-midi (créneaux 5-7). Les positions
+    # à cheval sont fixées à 0. Aucune infaisabilité possible : le matin offre
+    # 5 créneaux consécutifs et l'après-midi 3, largement assez pour les
+    # séances de 1 à 3h utilisées en pratique.
     #
     #   debut[s, k, d, t] = 1  ⇔  une séance de durée k du service s commence
     #                              le jour d au créneau t (couvre t..t+k-1).
@@ -358,6 +366,10 @@ def resoudre(classes, permanents, services, indispos, temps_max=120,
                 for t in range(N_SLOTS - k + 1):
                     v = model.new_bool_var(f"deb_{s}_{k}_{d}_{t}")
                     debut[s, k, d, t] = v
+                    # Séance à cheval sur la pause déjeuner : interdite.
+                    if t < IDX_DEBUT_APMIDI <= t + k - 1:
+                        model.add(v == 0)
+                        continue
                     if k >= 2:
                         seance_long_start[s].append((d, t, k, v))
 
