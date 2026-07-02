@@ -258,3 +258,64 @@ def retirer_version(versions, version_id):
     """Retourne la liste sans la version d'identifiant `version_id`."""
     return [v for v in (versions or []) if v.get("id") != version_id]
 
+
+def renommer_version(versions, version_id, nouveau_nom):
+    """Retourne une nouvelle liste où la version `version_id` porte
+    `nouveau_nom` (les autres versions sont inchangées)."""
+    nouveau_nom = (nouveau_nom or "").strip()
+    if not nouveau_nom:
+        return list(versions or [])
+    resultat = []
+    for v in (versions or []):
+        if v.get("id") == version_id:
+            v = dict(v)
+            v["nom"] = nouveau_nom
+        resultat.append(v)
+    return resultat
+
+
+# ─────────────── Export / import d'une version en FICHIER ───────────────
+# Filet de sécurité : le localStorage peut disparaître (cache vidé, autre
+# navigateur, autre appareil). Une version exportée en fichier .json se
+# réimporte partout.
+
+FORMAT_FICHIER_VERSION = "edt-version-1"   # marqueur de format (compatibilité)
+
+
+def version_vers_fichier(version):
+    """Version -> texte JSON lisible, prêt à télécharger."""
+    contenu = {"format": FORMAT_FICHIER_VERSION}
+    contenu.update({k: version.get(k) for k in
+                    ("nom", "horodatage", "nb_cours", "emplois")})
+    return json.dumps(contenu, ensure_ascii=False, indent=1)
+
+
+def fichier_vers_version(texte):
+    """Texte JSON d'un fichier exporté -> version (avec un id NEUF).
+    Retourne None si le fichier est illisible ou d'un autre format."""
+    import uuid
+    try:
+        contenu = json.loads(texte)
+    except Exception:
+        return None
+    if not isinstance(contenu, dict):
+        return None
+    if contenu.get("format") != FORMAT_FICHIER_VERSION:
+        return None
+    emplois = contenu.get("emplois")
+    if not isinstance(emplois, dict) or not emplois:
+        return None
+    # Validation minimale : les clés doivent se désérialiser en tuples 3 champs
+    try:
+        if _json_vers_emplois(emplois) is None:
+            return None
+    except Exception:
+        return None
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "nom": str(contenu.get("nom") or "Version importée"),
+        "horodatage": str(contenu.get("horodatage") or ""),
+        "nb_cours": int(contenu.get("nb_cours") or len(emplois)),
+        "emplois": emplois,
+    }
+

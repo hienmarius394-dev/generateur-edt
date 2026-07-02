@@ -43,7 +43,7 @@ st.set_page_config(
     page_title="EDT — Emplois du temps",
     page_icon="📅",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",  # visible sur ordinateur, repliée sur mobile
 )
 
 st.markdown("""
@@ -167,6 +167,8 @@ def sauvegarder_si_change():
     try:
         ls.setItem(persist.CLE_STORAGE, texte, key="edt_save")
         st.session_state._derniere_empreinte = emp
+        st.session_state._heure_sauvegarde = datetime.now().strftime("%H:%M:%S")
+        st.session_state._taille_sauvegarde = len(texte)
     except Exception:
         pass  # un échec d'écriture ne doit jamais casser l'app
 
@@ -215,6 +217,141 @@ def ecrire_versions(versions):
 
 
 restaurer_si_besoin()
+
+
+# ════════════════ PANNEAU LATÉRAL — MES SAUVEGARDES ════════════════
+# Un seul endroit, visible sur tous les écrans, qui liste TOUT ce qui est
+# conservé : l'état de la sauvegarde automatique + les versions nommées
+# (restaurer, renommer, télécharger, supprimer, importer).
+def _restaurer_version_choisie(v, versions):
+    """Restaure la version `v` en gardant un filet de sécurité : le travail
+    en cours est d'abord enregistré comme version auto s'il n'existe pas déjà
+    à l'identique dans la liste."""
+    emplois = st.session_state.get("emplois") or {}
+    liste_maj = versions
+    if emplois:
+        deja = any(persist.version_vers_emplois(x) == emplois for x in versions)
+        if not deja:
+            auto = persist.creer_version(
+                emplois, "Travail en cours (avant restauration)",
+                datetime.now().strftime("%d/%m/%Y %H:%M"))
+            liste_maj = persist.ajouter_version(versions, auto)
+        st.session_state.historique.append(dict(emplois))
+    st.session_state.emplois = persist.version_vers_emplois(v)
+    st.session_state.chaine = []
+    ecrire_versions(liste_maj)
+
+
+def panneau_sauvegardes():
+    with st.sidebar:
+        st.markdown("### 💾 Mes sauvegardes")
+
+        # ── 1) Sauvegarde automatique ──
+        if not _STORAGE_DISPO:
+            st.warning("Sauvegarde navigateur indisponible sur cet appareil. "
+                       "Pensez à exporter vos versions en fichier.")
+        else:
+            contenu = []
+            if st.session_state.get("donnees"):
+                contenu.append("données de l'établissement")
+            if st.session_state.get("emplois"):
+                contenu.append("emploi du temps")
+            if st.session_state.get("nb_modifs"):
+                contenu.append(f"{st.session_state['nb_modifs']} ajustement(s)")
+            heure = st.session_state.get("_heure_sauvegarde")
+            if contenu:
+                detail = ", ".join(contenu)
+                quand = f" · dernière écriture à {heure}" if heure else ""
+                st.caption(f"**Sauvegarde automatique : active** ✅  \n"
+                           f"Conservé : {detail}{quand}.")
+            else:
+                st.caption("**Sauvegarde automatique : en attente.** "
+                           "Elle démarre dès que vous importez un fichier.")
+
+        st.markdown("---")
+
+        # ── 2) Versions nommées ──
+        versions = charger_versions()
+        st.markdown(f"**🗂️ Versions enregistrées "
+                    f"({len(versions)}/{persist.MAX_VERSIONS})**")
+        if not versions:
+            st.caption("Aucune version pour l'instant. Enregistrez-en une "
+                       "depuis l'onglet **3 · Ajuster**.")
+        peut_restaurer = bool(st.session_state.get("donnees"))
+
+        for v in versions:
+            with st.expander(f"{v['nom']}", expanded=False):
+                st.caption(f"{v['horodatage']} · {v['nb_cours']} cours")
+
+                # Renommage en ligne
+                if st.session_state.get("_renommage_id") == v["id"]:
+                    nv = st.text_input("Nouveau nom", value=v["nom"],
+                                       key=f"sb_nom_{v['id']}")
+                    c_ok, c_ann = st.columns(2)
+                    if c_ok.button("Valider", key=f"sb_okren_{v['id']}",
+                                   use_container_width=True):
+                        ecrire_versions(
+                            persist.renommer_version(versions, v["id"], nv))
+                        st.session_state._renommage_id = None
+                        st.rerun()
+                    if c_ann.button("Annuler", key=f"sb_annren_{v['id']}",
+                                    use_container_width=True):
+                        st.session_state._renommage_id = None
+                        st.rerun()
+                else:
+                    c1, c2 = st.columns(2)
+                    if c1.button("📂 Restaurer", key=f"sb_rest_{v['id']}",
+                                 use_container_width=True,
+                                 disabled=not peut_restaurer,
+                                 help=None if peut_restaurer else
+                                 "Importez d'abord vos données (onglet 1)."):
+                        _restaurer_version_choisie(v, versions)
+                        st.success(f"« {v['nom']} » restaurée.")
+                        time.sleep(0.6)
+                        st.rerun()
+                    if c2.button("✏️ Renommer", key=f"sb_ren_{v['id']}",
+                                 use_container_width=True):
+                        st.session_state._renommage_id = v["id"]
+                        st.rerun()
+                    c3, c4 = st.columns(2)
+                    nom_fichier = "".join(
+                        c if c.isalnum() or c in "-_" else "_"
+                        for c in v["nom"][:30]) or "version"
+                    c3.download_button(
+                        "⬇️ Fichier", persist.version_vers_fichier(v),
+                        file_name=f"version_{nom_fichier}.edt.json",
+                        mime="application/json",
+                        key=f"sb_dl_{v['id']}", use_container_width=True,
+                        help="Copie de secours : se réimporte sur n'importe "
+                             "quel appareil.")
+                    if c4.button("🗑 Supprimer", key=f"sb_sup_{v['id']}",
+                                 use_container_width=True):
+                        ecrire_versions(
+                            persist.retirer_version(versions, v["id"]))
+                        st.rerun()
+
+        # ── 3) Importer une version depuis un fichier ──
+        with st.expander("📥 Importer une version (fichier)"):
+            fichier = st.file_uploader(
+                "Fichier .edt.json", type=["json"],
+                key="sb_import_version", label_visibility="collapsed")
+            if fichier is not None:
+                marque = f"{fichier.name}:{fichier.size}"
+                if st.session_state.get("_import_version_traite") != marque:
+                    v_imp = persist.fichier_vers_version(
+                        fichier.getvalue().decode("utf-8", errors="replace"))
+                    st.session_state._import_version_traite = marque
+                    if v_imp is None:
+                        st.error("Fichier illisible ou d'un autre format.")
+                    else:
+                        ecrire_versions(
+                            persist.ajouter_version(versions, v_imp))
+                        st.success(f"« {v_imp['nom']} » importée.")
+                        time.sleep(0.6)
+                        st.rerun()
+
+
+panneau_sauvegardes()
 
 
 # ════════════════════════ LECTURES COMPLÉMENTAIRES ════════════════════════
@@ -753,14 +890,17 @@ with tab3:
         emplois = st.session_state.emplois
         profs = sorted({i["prof"] for i in emplois.values()})
 
-        # ════════════ VERSIONS ENREGISTRÉES (historique nommé) ════════════
+        # ════════════ ENREGISTRER UNE VERSION (historique nommé) ════════════
+        # La LISTE complète (restaurer, renommer, télécharger, supprimer)
+        # vit dans le panneau latéral « 💾 Mes sauvegardes ».
         versions = charger_versions()
-        with st.expander(f"🗂️ Versions enregistrées ({len(versions)})",
+        with st.expander(f"🗂️ Enregistrer une version "
+                         f"({len(versions)}/{persist.MAX_VERSIONS} conservées)",
                          expanded=False):
             st.caption(
                 "Enregistrez l'emploi du temps actuel sous un nom pour le "
-                "retrouver plus tard. Pratique pour comparer plusieurs "
-                "organisations sans rien perdre."
+                "retrouver plus tard. Toutes vos versions sont listées dans "
+                "le panneau latéral **💾 Mes sauvegardes** (à gauche)."
             )
 
             # ── Enregistrer la version courante ──
@@ -783,56 +923,10 @@ with tab3:
                 nouvelle = persist.creer_version(emplois, nom, horod)
                 ecrire_versions(persist.ajouter_version(versions, nouvelle))
                 st.session_state.pop("saisie_nom_version", None)
-                st.success(f"Version « {nom} » enregistrée.")
+                st.success(f"Version « {nom} » enregistrée. Retrouvez-la "
+                           "dans le panneau latéral.")
                 time.sleep(0.8)
                 st.rerun()
-
-            # ── Liste des versions ──
-            if not versions:
-                st.info("Aucune version enregistrée pour l'instant.")
-            else:
-                st.markdown("**Vos versions** (de la plus récente à la plus ancienne) :")
-                for v in versions:
-                    c_info, c_rest, c_suppr = st.columns([3, 1, 1])
-                    with c_info:
-                        st.markdown(
-                            f"**{v['nom']}**  \n"
-                            f"<span style='color:#888;font-size:0.85em'>"
-                            f"{v['horodatage']} · {v['nb_cours']} cours</span>",
-                            unsafe_allow_html=True,
-                        )
-                    with c_rest:
-                        if st.button("📂 Restaurer", key=f"rest_{v['id']}",
-                                     use_container_width=True):
-                            # Filet de sécurité : on enregistre d'abord le travail
-                            # EN COURS comme version auto, pour ne rien perdre.
-                            deja = any(
-                                persist.version_vers_emplois(x) == emplois
-                                for x in versions
-                            )
-                            if not deja:
-                                auto = persist.creer_version(
-                                    emplois,
-                                    "Travail en cours (avant restauration)",
-                                    datetime.now().strftime("%d/%m/%Y %H:%M"),
-                                )
-                                liste_maj = persist.ajouter_version(versions, auto)
-                            else:
-                                liste_maj = versions
-                            # Restaurer la version choisie
-                            st.session_state.historique.append(dict(emplois))
-                            st.session_state.emplois = persist.version_vers_emplois(v)
-                            st.session_state.chaine = []
-                            ecrire_versions(liste_maj)
-                            st.success(f"Version « {v['nom']} » restaurée.")
-                            time.sleep(0.8)
-                            st.rerun()
-                    with c_suppr:
-                        if st.button("🗑", key=f"suppr_{v['id']}",
-                                     use_container_width=True,
-                                     help="Supprimer cette version"):
-                            ecrire_versions(persist.retirer_version(versions, v['id']))
-                            st.rerun()
 
         vue = st.radio("Vue", ["Par classe", "Par professeur"],
                        horizontal=True, label_visibility="collapsed")
